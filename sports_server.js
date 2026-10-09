@@ -154,7 +154,7 @@ function broadcast(event, data) {
 }
 
 function fingerprint(m) {
-  return JSON.stringify([m.status, m.statusText, m.home?.score, m.away?.score, m.teams?.map((t) => t.score)]);
+  return JSON.stringify([m.status, m.statusText, m.clock, m.home?.score, m.away?.score, m.teams?.map((t) => t.score)]);
 }
 
 function upsert(map, m) {
@@ -163,7 +163,7 @@ function upsert(map, m) {
   const changed = !prev || prev._fp !== fp;
   const next = { ...prev, ...m, _fp: fp, seenAt: Date.now(), updatedAt: changed ? new Date().toISOString() : prev.updatedAt };
   map.set(m.id, next);
-  if (changed && prev && (m.status === 'live' || prev.status !== m.status)) broadcast('update', clean(next));
+  if (changed && (m.status === 'live' || (prev && prev.status !== m.status))) broadcast('update', clean(next));
 }
 
 function prune(map, days = CONFIG.football.daysBack + 2) {
@@ -249,7 +249,11 @@ async function fetchFootballLeague(slug, from, to) {
   const base = `${ESPN}/site/v2/sports/soccer/${slug}/scoreboard`;
   let events = [];
   let name = null;
-  if (footballRangeOk) {
+  if (!from || !to) {
+    const d = await http(base);
+    events = d.events || [];
+    name = d.leagues?.[0]?.name;
+  } else if (footballRangeOk) {
     try {
       const d = await http(`${base}?dates=${ymd(from)}-${ymd(to)}&limit=500`);
       events = d.events || [];
@@ -260,7 +264,7 @@ async function fetchFootballLeague(slug, from, to) {
       console.warn('ℹ️  ESPN rejected date range — switching to per-day requests');
     }
   }
-  if (!footballRangeOk) {
+  if (from && to && !footballRangeOk) {
     for (let d = new Date(from); d <= to; d = addDays(d, 1)) {
       const r = await http(`${base}?dates=${ymd(d)}`);
       events.push(...(r.events || []));
@@ -285,9 +289,8 @@ async function footballScheduleSync() {
 
 async function footballLiveSync() {
   const hot = new Set([...store.football.values()].filter(isHot).map((m) => m.league.slug));
-  const now = new Date();
   for (const slug of hot) {
-    await track(`football:${slug}`, () => fetchFootballLeague(slug, addDays(now, -1), addDays(now, 1)));
+    await track(`football:${slug}`, () => fetchFootballLeague(slug));
   }
   return `${hot.size} leagues refreshed`;
 }
@@ -365,7 +368,7 @@ function parseCricketScore(str) {
         ? {
             runs: +m[1],
             wickets: m[2] != null ? +m[2] : 10, // ESPN omits wickets when all out
-            overs: m[4] ?? null,
+            overs: m[4] != null ? parseFloat(m[4]) : null,
             declared: !!m[3],
             target: target ? +target[1] : null,
             display: p,
@@ -509,7 +512,7 @@ function normCricbuzz({ info, score }) {
       .map((i) => ({
         runs: i.runs ?? 0,
         wickets: i.wickets ?? 0,
-        overs: i.overs != null ? String(i.overs) : null,
+        overs: i.overs != null ? parseFloat(i.overs) : null,
         declared: !!i.isDeclared,
         display: `${i.runs ?? 0}/${i.wickets ?? 0}${i.isDeclared ? 'd' : ''}${i.overs != null ? ` (${i.overs} ov)` : ''}`,
       }));
