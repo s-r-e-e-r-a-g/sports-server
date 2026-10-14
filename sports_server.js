@@ -41,9 +41,9 @@ const CONFIG = {
   },
 
   every: {
-    footballLive: 20_000,
+    footballLive: process.env.FOOTBALL_LIVE_MS ? +process.env.FOOTBALL_LIVE_MS : 15_000,
     footballSchedule: 10 * 60_000,
-    cricketLive: 30_000,   // when any cricket match is live
+    cricketLive: process.env.CRICKET_LIVE_MS ? +process.env.CRICKET_LIVE_MS : 15_000,   // when any cricket match is live
     cricketIdle: 2 * 60_000,
   },
 
