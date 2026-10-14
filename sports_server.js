@@ -353,6 +353,20 @@ async function footballStandings(slug) {
   }));
 }
 
+function normalizeOvers(ov) {
+  if (ov == null || ov === '') return null;
+  const num = parseFloat(ov);
+  if (isNaN(num)) return null;
+  const whole = Math.floor(num);
+  const balls = Math.round((num - whole) * 10);
+  if (balls >= 6) {
+    const extraOvers = Math.floor(balls / 6);
+    const remBalls = balls % 6;
+    return remBalls === 0 ? whole + extraOvers : parseFloat(`${whole + extraOvers}.${remBalls}`);
+  }
+  return balls === 0 ? whole : parseFloat(num.toFixed(1));
+}
+
 // ═══════════════════ CRICKET — ESPN ADAPTER (header feed) ═════════════
 // Handles: "465", "308/6 (97.5 ov)", "214 & 84/2 (16 ov, target 140)", "92/7 (10.4/11 ov, target 92)"
 function parseCricketScore(str) {
@@ -364,16 +378,20 @@ function parseCricketScore(str) {
     .map((p) => {
       const m = p.match(/^(\d+)(?:\/(\d+))?\s*(d)?(?:\s*\(\s*(\d+(?:\.\d)?)(?:\/\d+)?\s*ov)?/i);
       const target = p.match(/target\s+(\d+)/i);
-      return m
-        ? {
-            runs: +m[1],
-            wickets: m[2] != null ? +m[2] : 10, // ESPN omits wickets when all out
-            overs: m[4] != null ? parseFloat(m[4]) : null,
-            declared: !!m[3],
-            target: target ? +target[1] : null,
-            display: p,
-          }
-        : { display: p };
+      if (!m) return { display: p };
+      const ov = m[4] != null ? normalizeOvers(m[4]) : null;
+      let disp = p;
+      if (ov != null && m[4] != null && String(ov) !== m[4]) {
+        disp = p.replace(new RegExp(`\\b${m[4]}\\s*ov`, 'i'), `${ov} ov`);
+      }
+      return {
+        runs: +m[1],
+        wickets: m[2] != null ? +m[2] : 10, // ESPN omits wickets when all out
+        overs: ov,
+        declared: !!m[3],
+        target: target ? +target[1] : null,
+        display: disp,
+      };
     });
 }
 
@@ -509,13 +527,16 @@ function normCricbuzz({ info, score }) {
       .filter((k) => /^inngs\d+$/.test(k))
       .sort()
       .map((k) => ts[k])
-      .map((i) => ({
-        runs: i.runs ?? 0,
-        wickets: i.wickets ?? 0,
-        overs: i.overs != null ? parseFloat(i.overs) : null,
-        declared: !!i.isDeclared,
-        display: `${i.runs ?? 0}/${i.wickets ?? 0}${i.isDeclared ? 'd' : ''}${i.overs != null ? ` (${i.overs} ov)` : ''}`,
-      }));
+      .map((i) => {
+        const ov = normalizeOvers(i.overs);
+        return {
+          runs: i.runs ?? 0,
+          wickets: i.wickets ?? 0,
+          overs: ov,
+          declared: !!i.isDeclared,
+          display: `${i.runs ?? 0}/${i.wickets ?? 0}${i.isDeclared ? 'd' : ''}${ov != null ? ` (${ov} ov)` : ''}`,
+        };
+      });
   const team = (t, ts) => {
     const inn = innings(ts);
     return { name: t?.teamName, short: t?.teamSName, score: inn.map((i) => i.display).join(' & ') || null, innings: inn };
@@ -551,8 +572,11 @@ async function cricbuzzSync() {
 // ═══════════════════════ CRICKET — MERGE SOURCES ══════════════════════
 const balls = (o) => {
   if (o == null) return 0;
-  const [a, b = '0'] = String(o).split('.');
-  return +a * 6 + +b;
+  const num = normalizeOvers(o);
+  if (num == null) return 0;
+  const whole = Math.floor(num);
+  const b = Math.round((num - whole) * 10);
+  return whole * 6 + b;
 };
 const progress = (m) =>
   m.teams.reduce((s, t) => s + (t.innings || []).reduce((x, i) => x + balls(i.overs) * 1000 + (i.runs || 0), 0), 0);
@@ -628,6 +652,61 @@ function filterMatches(list, q, kind) {
 const hasLiveCricket = () => [...store.cricketEspn.values(), ...store.cricketCb.values()].some(isHot);
 const h = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => res.status(502).json({ error: e.message }));
 
+// ═══════════════════════ EMO COMPACT TRANSFORMERS ═════════════════════
+function toEmoCricketMatch(m) {
+  if (!m) return null;
+  return {
+    title: m.title || '',
+    status: m.status || 'scheduled',
+    statusText: m.statusText || '',
+    format: m.format || '',
+    startTime: m.startTime || '',
+    teams: (m.teams || []).slice(0, 2).map((t) => ({
+      name: t.name || '',
+      short: t.short || '?',
+      innings: (t.innings || []).slice(0, 2).map((i) => ({
+        runs: i.runs ?? 0,
+        wickets: i.wickets ?? 0,
+        overs: normalizeOvers(i.overs),
+      })),
+    })),
+  };
+}
+
+function toEmoFootballMatch(m) {
+  if (!m) return null;
+  return {
+    startTime: m.startTime || '',
+    status: m.status || 'scheduled',
+    statusText: m.statusText || '',
+    clock: m.clock || null,
+    venue: m.venue || '',
+    home: {
+      name: m.home?.name || '',
+      short: m.home?.short || '?',
+      score: m.home?.score ?? null,
+    },
+    away: {
+      name: m.away?.name || '',
+      short: m.away?.short || '?',
+      score: m.away?.score ?? null,
+    },
+  };
+}
+
+function toEmoStandings(groups) {
+  return (groups || []).map((g) => ({
+    group: g.group || null,
+    table: (g.table || []).slice(0, 20).map((e) => ({
+      rank: e.rank,
+      short: e.short || '?',
+      played: e.played ?? 0,
+      gd: e.gd ?? 0,
+      points: e.points ?? 0,
+    })),
+  }));
+}
+
 // ═══════════════════════════════ ROUTES ═══════════════════════════════
 const app = express();
 app.use(cors());
@@ -645,6 +724,17 @@ app.get('/', (req, res) =>
       'GET /api/cricket/{live|fixtures|results|all}?date=YYYY-MM-DD&series=asia&team=india&format=t20',
       'GET /api/cricket/series',
       'GET /api/cricket/match/:id',
+      '--- EmoDesk Compact Endpoints (essential data only) ---',
+      'GET /api/emo/health',
+      'GET /api/emo/live',
+      'GET /api/emo/stream',
+      'GET /api/emo/football/{live|fixtures|results|all}',
+      'GET /api/emo/football/leagues',
+      'GET /api/emo/football/match/:id',
+      'GET /api/emo/football/standings/:league',
+      'GET /api/emo/cricket/{live|fixtures|results|all}',
+      'GET /api/emo/cricket/series',
+      'GET /api/emo/cricket/match/:id',
     ],
   })
 );
@@ -688,6 +778,7 @@ app.get('/api/football/standings/:league', h(async (req, res) => {
   res.json(await cached(`st:${req.params.league}`, 30 * 60_000, () => footballStandings(req.params.league)));
 }));
 
+app.get('/api/cricket/debug', (req, res) => res.json({ ok: true, server: 'EmoDesk Sports Server', endpoints: '/api' }));
 app.get('/api/cricket/series', (req, res) => res.json([...store.cricketSeries.values()].map(({ seenAt, ...s }) => s)));
 app.get('/api/cricket/match/:id', h(async (req, res) => {
   const id = req.params.id;
@@ -704,6 +795,72 @@ app.get('/api/stream', (req, res) => {
     `event: snapshot\ndata: ${JSON.stringify({
       football: sport === 'cricket' ? [] : filterMatches([...store.football.values()], {}, 'live'),
       cricket: sport === 'football' ? [] : filterMatches(cricketMatches(), {}, 'live'),
+    })}\n\n`
+  );
+  sseClients.set(res, sport);
+  const ping = setInterval(() => res.write(': ping\n\n'), 25_000);
+  req.on('close', () => {
+    clearInterval(ping);
+    sseClients.delete(res);
+  });
+});
+
+// ═══════════════════ EMO COMPACT ROUTES (/api/emo/...) ════════════════
+app.get('/api/emo/health', (req, res) =>
+  res.json({ ok: true, uptime: Math.round(process.uptime()) })
+);
+
+app.get('/api/emo/live', (req, res) =>
+  res.json({
+    football: filterMatches([...store.football.values()], req.query, 'live').map(toEmoFootballMatch),
+    cricket: filterMatches(cricketMatches(), req.query, 'live').map(toEmoCricketMatch),
+  })
+);
+
+for (const kind of ['live', 'fixtures', 'results', 'all']) {
+  app.get(`/api/emo/football/${kind}`, (req, res) =>
+    res.json(filterMatches([...store.football.values()], req.query, kind).map(toEmoFootballMatch))
+  );
+  app.get(`/api/emo/cricket/${kind}`, (req, res) =>
+    res.json(filterMatches(cricketMatches(), req.query, kind).map(toEmoCricketMatch))
+  );
+}
+
+app.get('/api/emo/football/leagues', (req, res) =>
+  res.json(Object.entries(CONFIG.football.leagues).map(([slug, name]) => ({ slug, name })))
+);
+
+app.get('/api/emo/football/match/:id', h(async (req, res) => {
+  const m = store.football.get(req.params.id);
+  if (!m) return res.status(404).json({ error: 'Match not found' });
+  res.json(toEmoFootballMatch(m));
+}));
+
+app.get('/api/emo/football/standings/:league', h(async (req, res) => {
+  const data = await cached(`st:${req.params.league}`, 30 * 60_000, () => footballStandings(req.params.league));
+  res.json(toEmoStandings(data));
+}));
+
+app.get('/api/emo/cricket/debug', (req, res) => res.json({ ok: true, server: 'EmoDesk Sports Server', endpoints: '/api/emo' }));
+app.get('/api/emo/cricket/series', (req, res) =>
+  res.json([...store.cricketSeries.values()].map(({ id, name }) => ({ id, name })))
+);
+
+app.get('/api/emo/cricket/match/:id', h(async (req, res) => {
+  const id = req.params.id;
+  const m = cricketMatches().find((x) => x.id === id || `cr_cb_${x.cricbuzzId}` === id);
+  if (!m) return res.status(404).json({ error: 'Match not found' });
+  res.json(toEmoCricketMatch(m));
+}));
+
+app.get('/api/emo/stream', (req, res) => {
+  res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  res.flushHeaders();
+  const sport = ['cricket', 'football'].includes(req.query.sport) ? req.query.sport : null;
+  res.write(
+    `event: snapshot\ndata: ${JSON.stringify({
+      football: sport === 'cricket' ? [] : filterMatches([...store.football.values()], {}, 'live').map(toEmoFootballMatch),
+      cricket: sport === 'football' ? [] : filterMatches(cricketMatches(), {}, 'live').map(toEmoCricketMatch),
     })}\n\n`
   );
   sseClients.set(res, sport);
