@@ -819,10 +819,18 @@ app.get('/api/emo/live', (req, res) =>
 
 for (const kind of ['live', 'fixtures', 'results', 'all']) {
   app.get(`/api/emo/football/${kind}`, (req, res) =>
-    res.json(filterMatches([...store.football.values()], req.query, kind).map(toEmoFootballMatch))
+    res.json(
+      filterMatches([...store.football.values()], req.query, kind)
+        .slice(0, req.query.limit ? parseInt(req.query.limit) : 12)
+        .map(toEmoFootballMatch)
+    )
   );
   app.get(`/api/emo/cricket/${kind}`, (req, res) =>
-    res.json(filterMatches(cricketMatches(), req.query, kind).map(toEmoCricketMatch))
+    res.json(
+      filterMatches(cricketMatches(), req.query, kind)
+        .slice(0, req.query.limit ? parseInt(req.query.limit) : 10)
+        .map(toEmoCricketMatch)
+    )
   );
 }
 
