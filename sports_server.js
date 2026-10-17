@@ -689,11 +689,21 @@ function filterMatches(list, q, kind) {
     const s = String(q.series).toLowerCase();
     out = out.filter((m) => String(m.series?.id) === s || (m.series?.name || '').toLowerCase().includes(s));
   }
-  if (q.team) {
-    const t = normName(q.team);
-    out = out.filter((m) =>
-      (m.teams || [m.home, m.away]).some((x) => normName(x?.name).includes(t) || normName(x?.short) === t)
-    );
+  const rawTeam = q.teams || q.team || '';
+  if (rawTeam) {
+    const teamList = String(rawTeam)
+      .split(/[,;]/)
+      .map((s) => normName(s.trim()))
+      .filter(Boolean);
+    if (teamList.length > 0) {
+      out = out.filter((m) =>
+        (m.teams || [m.home, m.away]).some((x) => {
+          const xn = normName(x?.name);
+          const xs = normName(x?.short);
+          return teamList.some((t) => (xn && xn.includes(t)) || (xs && xs === t) || (t && t.includes(xn)) || (t && t.includes(xs)));
+        })
+      );
+    }
   }
   const dir = kind === 'results' ? -1 : 1;
   return out.map(clean).sort((a, b) => dir * (new Date(a.startTime) - new Date(b.startTime)));
