@@ -655,19 +655,27 @@ const h = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => res.s
 // ═══════════════════════ EMO COMPACT TRANSFORMERS ═════════════════════
 function toEmoCricketMatch(m) {
   if (!m) return null;
+  const allInnings = (m.teams || []).flatMap((t) => t.innings || []);
+  const currentInnings = allInnings[allInnings.length - 1];
   return {
     title: m.title || '',
     status: m.status || 'scheduled',
     statusText: m.statusText || '',
     format: m.format || '',
     startTime: m.startTime || '',
+    venue: m.venue || '',
+    series: m.series?.name || '',
+    target: currentInnings?.target ?? null,
     teams: (m.teams || []).slice(0, 2).map((t) => ({
       name: t.name || '',
       short: t.short || '?',
+      batting: t.batting === true,
+      score: t.score || '',
       innings: (t.innings || []).slice(0, 2).map((i) => ({
         runs: i.runs ?? 0,
         wickets: i.wickets ?? 0,
         overs: normalizeOvers(i.overs),
+        target: i.target ?? null,
       })),
     })),
   };
@@ -681,15 +689,18 @@ function toEmoFootballMatch(m) {
     statusText: m.statusText || '',
     clock: m.clock || null,
     venue: m.venue || '',
+    league: m.league?.name || '',
     home: {
       name: m.home?.name || '',
       short: m.home?.short || '?',
       score: m.home?.score ?? null,
+      form: m.home?.form || '',
     },
     away: {
       name: m.away?.name || '',
       short: m.away?.short || '?',
       score: m.away?.score ?? null,
+      form: m.away?.form || '',
     },
   };
 }
