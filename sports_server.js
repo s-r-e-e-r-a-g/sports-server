@@ -596,6 +596,8 @@ async function getCricbuzzLive(matchId) {
       crr: mini.currentRunRate || (mini.overs > 0 ? +(mini.batTeam?.teamScore / mini.overs).toFixed(2) : null),
       target: mini.target || null,
       status: mini.status || null,
+      batTeamId: mini.batTeam?.teamId != null ? String(mini.batTeam.teamId) : null,
+      batTeamName: mini.batTeam?.teamName || null,
     };
     miniScoreCache.set(matchId, { at: Date.now(), data });
     return data;
@@ -610,7 +612,7 @@ async function cricbuzzSync() {
   if (!items.length) throw new Error('Page loaded but no match data found — Cricbuzz layout may have changed');
   for (const it of items) upsert(store.cricketCb, normCricbuzz(it));
   const liveMatches = [...store.cricketCb.values()].filter((m) => m.status === 'live');
-  for (const lm of liveMatches.slice(0, 3)) {
+  for (const lm of liveMatches.slice(0, 8)) {
     const live = await getCricbuzzLive(lm.sourceId);
     if (live) lm.live = live;
   }
@@ -632,8 +634,25 @@ const progress = (m) =>
 
 function matchKeys(m) {
   const day = (m.startTime || '').slice(0, 10);
-  const pair = (f) => m.teams.map((t) => normName(f(t))).filter(Boolean).sort().join('|');
-  return [pair((t) => t.name), pair((t) => t.short)].filter((k) => k.includes('|')).map((k) => `${k}@${day}`);
+  const pair = (f) => (m.teams || []).map((t) => normName(f(t))).filter(Boolean).sort().join('|');
+  const pName = pair((t) => t.name);
+  const pShort = pair((t) => t.short);
+  const keys = [];
+  for (const p of [pName, pShort]) {
+    if (!p || !p.includes('|')) continue;
+    if (day) {
+      keys.push(`${p}@${day}`);
+      try {
+        const d = new Date(m.startTime);
+        keys.push(`${p}@${addDays(d, -1).toISOString().slice(0, 10)}`);
+        keys.push(`${p}@${addDays(d, 1).toISOString().slice(0, 10)}`);
+      } catch {}
+    }
+    if (m.status === 'live') {
+      keys.push(`${p}@live`);
+    }
+  }
+  return [...new Set(keys)];
 }
 
 function cricketMatches() {
@@ -717,6 +736,7 @@ function toEmoCricketMatch(m) {
   if (!m) return null;
   const allInnings = (m.teams || []).flatMap((t) => t.innings || []);
   const currentInnings = allInnings[allInnings.length - 1];
+  const hasExplicitBatting = (m.teams || []).some((t) => t.batting === true);
   return {
     title: m.title || '',
     status: m.status || 'scheduled',
@@ -730,18 +750,31 @@ function toEmoCricketMatch(m) {
     bat2: m.live?.bat2 || '',
     bowl: m.live?.bowl || '',
     crr: m.live?.crr ?? null,
-    teams: (m.teams || []).slice(0, 2).map((t) => ({
-      name: t.name || '',
-      short: t.short || '?',
-      batting: t.batting === true,
-      score: t.score || '',
-      innings: (t.innings || []).slice(0, 2).map((i) => ({
-        runs: i.runs ?? 0,
-        wickets: i.wickets ?? 0,
-        overs: normalizeOvers(i.overs),
-        target: i.target ?? null,
-      })),
-    })),
+    teams: (m.teams || []).slice(0, 2).map((t, idx) => {
+      let isBatting = t.batting === true;
+      if (!hasExplicitBatting && m.status === 'live') {
+        if (m.live?.batTeamId && (String(t.id) === m.live.batTeamId || String(t.sourceId) === m.live.batTeamId)) {
+          isBatting = true;
+        } else if (m.live?.batTeamName && normName(t.name).includes(normName(m.live.batTeamName))) {
+          isBatting = true;
+        } else if (!m.live?.batTeamId && !m.live?.batTeamName) {
+          const t2HasInn = (m.teams[1]?.innings || []).length > 0;
+          isBatting = (idx === 1 && t2HasInn) || (idx === 0 && !t2HasInn);
+        }
+      }
+      return {
+        name: t.name || '',
+        short: t.short || '?',
+        batting: isBatting,
+        score: t.score || '',
+        innings: (t.innings || []).slice(0, 2).map((i) => ({
+          runs: i.runs ?? 0,
+          wickets: i.wickets ?? 0,
+          overs: normalizeOvers(i.overs),
+          target: i.target ?? null,
+        })),
+      };
+    }),
   };
 }
 
@@ -847,16 +880,33 @@ app.get('/api/health', (req, res) =>
   })
 );
 
-app.get('/api/live', (req, res) =>
+app.get('/api/live', async (req, res) => {
+  if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
+  if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
   res.json({
     football: filterMatches([...store.football.values()], req.query, 'live'),
     cricket: filterMatches(cricketMatches(), req.query, 'live'),
-  })
-);
+  });
+});
 
 for (const kind of ['live', 'fixtures', 'results', 'all']) {
-  app.get(`/api/football/${kind}`, (req, res) => res.json(filterMatches([...store.football.values()], req.query, kind)));
-  app.get(`/api/cricket/${kind}`, (req, res) => res.json(filterMatches(cricketMatches(), req.query, kind)));
+  app.get(`/api/football/${kind}`, async (req, res) => {
+    const league = req.query.league;
+    const hasLeague = !league || [...store.football.values()].some((m) => m.league?.slug === league);
+    if (store.football.size === 0 || !hasLeague) {
+      try {
+        if (league && CONFIG.football.leagues[league]) await fetchFootballLeague(league);
+        else if (store.football.size === 0) await footballScheduleSync();
+      } catch {}
+    }
+    res.json(filterMatches([...store.football.values()], req.query, kind));
+  });
+  app.get(`/api/cricket/${kind}`, async (req, res) => {
+    if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) {
+      try { await cricketSync(); } catch {}
+    }
+    res.json(filterMatches(cricketMatches(), req.query, kind));
+  });
 }
 
 app.get('/api/football/leagues', (req, res) =>
@@ -903,28 +953,41 @@ app.get('/api/emo/health', (req, res) =>
   res.json({ ok: true, uptime: Math.round(process.uptime()) })
 );
 
-app.get('/api/emo/live', (req, res) =>
+app.get('/api/emo/live', async (req, res) => {
+  if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
+  if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
   res.json({
     football: filterMatches([...store.football.values()], req.query, 'live').map(toEmoFootballMatch),
     cricket: filterMatches(cricketMatches(), req.query, 'live').map(toEmoCricketMatch),
-  })
-);
+  });
+});
 
 for (const kind of ['live', 'fixtures', 'results', 'all']) {
-  app.get(`/api/emo/football/${kind}`, (req, res) =>
+  app.get(`/api/emo/football/${kind}`, async (req, res) => {
+    const league = req.query.league;
+    const hasLeague = !league || [...store.football.values()].some((m) => m.league?.slug === league);
+    if (store.football.size === 0 || !hasLeague) {
+      try {
+        if (league && CONFIG.football.leagues[league]) await fetchFootballLeague(league);
+        else if (store.football.size === 0) await footballScheduleSync();
+      } catch {}
+    }
     res.json(
       filterMatches([...store.football.values()], req.query, kind)
         .slice(0, req.query.limit ? parseInt(req.query.limit) : 12)
         .map(toEmoFootballMatch)
-    )
-  );
-  app.get(`/api/emo/cricket/${kind}`, (req, res) =>
+    );
+  });
+  app.get(`/api/emo/cricket/${kind}`, async (req, res) => {
+    if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) {
+      try { await cricketSync(); } catch {}
+    }
     res.json(
       filterMatches(cricketMatches(), req.query, kind)
         .slice(0, req.query.limit ? parseInt(req.query.limit) : 10)
         .map(toEmoCricketMatch)
-    )
-  );
+    );
+  });
 }
 
 app.get('/api/emo/football/leagues', (req, res) =>
