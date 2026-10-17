@@ -560,11 +560,60 @@ function normCricbuzz({ info, score }) {
   };
 }
 
+const miniScoreCache = new Map();
+async function getCricbuzzLive(matchId) {
+  if (!matchId) return null;
+  const cached = miniScoreCache.get(matchId);
+  if (cached && Date.now() - cached.at < 15_000) return cached.data;
+  try {
+    const url = `https://www.cricbuzz.com/live-cricket-scores/${matchId}`;
+    const res = await http(url, { as: 'text' });
+    const chunks = [...res.matchAll(/self\.__next_f\.push\(\[1,"((?:[^"\\]|\\.)*)"\]\)/g)].map((m) => {
+      try { return JSON.parse(`"${m[1]}"`); } catch { return ''; }
+    });
+    const text = res + '\n' + chunks.join('');
+    const idx = text.indexOf('"miniscore":');
+    if (idx === -1) return null;
+    const raw = sliceBalanced(text, idx + '"miniscore":'.length);
+    if (!raw) return null;
+    const mini = JSON.parse(raw);
+    const fmtBat = (b, star = false) => {
+      if (!b || !b.name) return '';
+      const parts = b.name.trim().split(/\s+/);
+      const short = parts.length > 1 ? `${parts[0][0]}. ${parts.slice(1).join(' ')}` : b.name;
+      return `${short} ${b.runs}(${b.balls})${star ? '*' : ''}`;
+    };
+    const fmtBowl = (b) => {
+      if (!b || !b.name) return '';
+      const parts = b.name.trim().split(/\s+/);
+      const short = parts.length > 1 ? `${parts[0][0]}. ${parts.slice(1).join(' ')}` : b.name;
+      return `${short} ${b.wickets}/${b.runs} (${b.overs})`;
+    };
+    const data = {
+      bat1: fmtBat(mini.batsmanStriker, true),
+      bat2: fmtBat(mini.batsmanNonStriker, false),
+      bowl: fmtBowl(mini.bowlerStriker),
+      crr: mini.currentRunRate || (mini.overs > 0 ? +(mini.batTeam?.teamScore / mini.overs).toFixed(2) : null),
+      target: mini.target || null,
+      status: mini.status || null,
+    };
+    miniScoreCache.set(matchId, { at: Date.now(), data });
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function cricbuzzSync() {
   const html = await http(CRICBUZZ_LIVE, { as: 'text' });
   const items = extractCricbuzz(html);
   if (!items.length) throw new Error('Page loaded but no match data found — Cricbuzz layout may have changed');
   for (const it of items) upsert(store.cricketCb, normCricbuzz(it));
+  const liveMatches = [...store.cricketCb.values()].filter((m) => m.status === 'live');
+  for (const lm of liveMatches.slice(0, 3)) {
+    const live = await getCricbuzzLive(lm.sourceId);
+    if (live) lm.live = live;
+  }
   prune(store.cricketCb);
   return `${items.length} matches`;
 }
@@ -614,6 +663,7 @@ function cricketMatches() {
       target.scoreSource = 'cricbuzz';
       if (cb.status === 'finished' || target.status === 'scheduled') target.status = cb.status;
     }
+    if (cb.live) target.live = cb.live;
   }
   return merged;
 }
@@ -660,12 +710,16 @@ function toEmoCricketMatch(m) {
   return {
     title: m.title || '',
     status: m.status || 'scheduled',
-    statusText: m.statusText || '',
+    statusText: m.live?.status || m.statusText || '',
     format: m.format || '',
     startTime: m.startTime || '',
     venue: m.venue || '',
     series: m.series?.name || '',
-    target: currentInnings?.target ?? null,
+    target: m.live?.target ?? currentInnings?.target ?? null,
+    bat1: m.live?.bat1 || '',
+    bat2: m.live?.bat2 || '',
+    bowl: m.live?.bowl || '',
+    crr: m.live?.crr ?? null,
     teams: (m.teams || []).slice(0, 2).map((t) => ({
       name: t.name || '',
       short: t.short || '?',
@@ -683,6 +737,22 @@ function toEmoCricketMatch(m) {
 
 function toEmoFootballMatch(m) {
   if (!m) return null;
+  const homeGoals = [];
+  const awayGoals = [];
+  for (const e of (m.events || [])) {
+    if (e.goal || /goal|penalty/i.test(e.type || '')) {
+      const athlete = e.player || '';
+      const p = athlete ? athlete.trim().split(/\s+/).pop() : 'Goal';
+      const tag = e.ownGoal ? '(OG)' : (e.penalty ? '(P)' : '');
+      const min = e.minute ? `${e.minute}'` : '';
+      const str = `${p} ${min}${tag}`.trim();
+      if (String(e.teamId) === String(m.home?.id)) {
+        homeGoals.push(str);
+      } else if (String(e.teamId) === String(m.away?.id)) {
+        awayGoals.push(str);
+      }
+    }
+  }
   return {
     startTime: m.startTime || '',
     status: m.status || 'scheduled',
@@ -695,12 +765,14 @@ function toEmoFootballMatch(m) {
       short: m.home?.short || '?',
       score: m.home?.score ?? null,
       form: m.home?.form || '',
+      scorers: homeGoals.slice(0, 3).join(', '),
     },
     away: {
       name: m.away?.name || '',
       short: m.away?.short || '?',
       score: m.away?.score ?? null,
       form: m.away?.form || '',
+      scorers: awayGoals.slice(0, 3).join(', '),
     },
   };
 }
