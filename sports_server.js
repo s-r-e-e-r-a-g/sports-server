@@ -201,22 +201,76 @@ function espnStatus(state, label = '') {
   return 'scheduled';
 }
 
+function makeShortName(short, name) {
+  const s = (short || '').trim();
+  const n = (name || '').trim();
+  if (s && s.length >= 2 && s.length <= 4 && !/\s/.test(s) && (s.toLowerCase() !== n.toLowerCase() || n.length <= 4)) {
+    return s.toUpperCase();
+  }
+  const src = n || s;
+  if (!src) return '?';
+  const cleanStr = src.replace(/[^a-zA-Z0-9\s]/g, ' ').trim();
+  const words = cleanStr.split(/\s+/).filter((w) => !/^(and|of|the|vs|&)$/i.test(w));
+  if (words.length >= 3) {
+    return words.slice(0, 4).map((w) => w[0].toUpperCase()).join('');
+  }
+  if (words.length === 2) {
+    return (words[0][0] + words[1][0]).toUpperCase();
+  }
+  return words[0].slice(0, Math.min(3, words[0].length)).toUpperCase();
+}
+
 // ═══════════════════════ FOOTBALL — ESPN ADAPTER ══════════════════════
 function normFootball(ev, slug, leagueName) {
   const comp = ev.competitions?.[0] || {};
   const st = comp.status || ev.status || {};
   const status = espnStatus(st.type?.state, st.type?.name);
-  const team = (c) =>
-    c && {
+  const events = (comp.details || []).map((d) => ({
+    type: d.type?.text,
+    minute: d.clock?.displayValue,
+    teamId: d.team?.id,
+    player: d.athletesInvolved?.[0]?.displayName || null,
+    goal: !!d.scoringPlay,
+    penalty: !!d.penaltyKick,
+    ownGoal: !!d.ownGoal,
+    yellow: !!d.yellowCard,
+    red: !!d.redCard,
+  }));
+  const comps = comp.competitors || [];
+  const homeComp = comps.find((c) => c.homeAway === 'home') || comps[0];
+  const awayComp = comps.find((c) => c.homeAway === 'away') || comps[1];
+
+  let homeGoalsFromEvents = 0;
+  let awayGoalsFromEvents = 0;
+  for (const e of events) {
+    if (e.goal || /goal|penalty/i.test(e.type || '')) {
+      if (e.ownGoal) {
+        if (String(e.teamId) === String(homeComp?.team?.id)) awayGoalsFromEvents++;
+        else if (String(e.teamId) === String(awayComp?.team?.id)) homeGoalsFromEvents++;
+      } else {
+        if (String(e.teamId) === String(homeComp?.team?.id)) homeGoalsFromEvents++;
+        else if (String(e.teamId) === String(awayComp?.team?.id)) awayGoalsFromEvents++;
+      }
+    }
+  }
+
+  const team = (c, goalsFromEvents) => {
+    if (!c) return null;
+    let s = (status === 'scheduled' || c.score == null || c.score === '') ? null : Number(c.score);
+    if (status !== 'scheduled' && goalsFromEvents > (s ?? 0)) {
+      s = goalsFromEvents;
+    }
+    return {
       id: c.team?.id,
       name: c.team?.displayName,
-      short: c.team?.abbreviation,
+      short: makeShortName(c.team?.abbreviation, c.team?.displayName),
       logo: c.team?.logo,
       form: c.form || null,
-      score: status === 'scheduled' || c.score == null || c.score === '' ? null : Number(c.score),
+      score: s,
       winner: c.winner === true,
     };
-  const comps = comp.competitors || [];
+  };
+
   return {
     id: `fb_${ev.id}`,
     sourceId: String(ev.id),
@@ -228,19 +282,9 @@ function normFootball(ev, slug, leagueName) {
     statusText: st.type?.shortDetail || st.type?.detail || '',
     clock: status === 'live' ? st.displayClock || null : null,
     venue: comp.venue?.fullName || null,
-    home: team(comps.find((c) => c.homeAway === 'home') || comps[0]),
-    away: team(comps.find((c) => c.homeAway === 'away') || comps[1]),
-    events: (comp.details || []).map((d) => ({
-      type: d.type?.text,
-      minute: d.clock?.displayValue,
-      teamId: d.team?.id,
-      player: d.athletesInvolved?.[0]?.displayName || null,
-      goal: !!d.scoringPlay,
-      penalty: !!d.penaltyKick,
-      ownGoal: !!d.ownGoal,
-      yellow: !!d.yellowCard,
-      red: !!d.redCard,
-    })),
+    home: team(homeComp, homeGoalsFromEvents),
+    away: team(awayComp, awayGoalsFromEvents),
+    events,
   };
 }
 
@@ -337,7 +381,7 @@ async function footballStandings(slug) {
         return {
           rank: s.rank,
           team: e.team?.displayName,
-          short: e.team?.abbreviation,
+          short: makeShortName(e.team?.abbreviation, e.team?.displayName),
           logo: e.team?.logos?.[0]?.href,
           played: s.gamesPlayed,
           won: s.wins,
@@ -424,7 +468,7 @@ function normCricketEspn(ev, lg) {
     teams: (ev.competitors || []).map((c) => ({
       id: c.id,
       name: c.displayName,
-      short: c.abbreviation,
+      short: makeShortName(c.abbreviation, c.displayName),
       logo: c.logo || null,
       score: c.score || null,
       innings: parseCricketScore(c.score),
@@ -539,7 +583,7 @@ function normCricbuzz({ info, score }) {
       });
   const team = (t, ts) => {
     const inn = innings(ts);
-    return { name: t?.teamName, short: t?.teamSName, score: inn.map((i) => i.display).join(' & ') || null, innings: inn };
+    return { name: t?.teamName, short: makeShortName(t?.teamSName, t?.teamName), score: inn.map((i) => i.display).join(' & ') || null, innings: inn };
   };
   const ms = Number(info.startDate);
   return {
@@ -596,13 +640,106 @@ async function getCricbuzzLive(matchId) {
       crr: mini.currentRunRate || (mini.overs > 0 ? +(mini.batTeam?.teamScore / mini.overs).toFixed(2) : null),
       target: mini.target || null,
       status: mini.status || null,
+      recent: mini.recentOvsStats || '',
+      rrr: mini.requiredRunRate != null ? Number(mini.requiredRunRate) : null,
+      remRuns: mini.remRunsToWin != null ? Number(mini.remRunsToWin) : null,
+      oversRem: mini.oversRem != null ? Number(mini.oversRem) : null,
+      partner: mini.partnerShip ? `${mini.partnerShip.runs || 0}(${mini.partnerShip.balls || 0})` : '',
       batTeamId: mini.batTeam?.teamId != null ? String(mini.batTeam.teamId) : null,
       batTeamName: mini.batTeam?.teamName || null,
+      batTeamScore: mini.batTeam?.teamScore != null ? Number(mini.batTeam.teamScore) : null,
+      batTeamWkts: mini.batTeam?.teamWkts != null ? Number(mini.batTeam.teamWkts) : null,
+      batTeamOvers: mini.overs != null ? normalizeOvers(mini.overs) : null,
+      inningsScoreList: (mini.matchScoreDetails?.inningsScoreList || mini.batTeamScoreObj?.teamInningsArray || []).map((i) => ({
+        batTeamId: i.batTeamId != null ? String(i.batTeamId) : null,
+        batTeamName: i.batTeamName || null,
+        score: i.score != null ? Number(i.score) : null,
+        wickets: i.wickets != null ? Number(i.wickets) : null,
+        overs: normalizeOvers(i.overs),
+        isDeclared: !!i.isDeclared,
+      })),
     };
     miniScoreCache.set(matchId, { at: Date.now(), data });
     return data;
   } catch (e) {
     return null;
+  }
+}
+
+function applyLiveScoreToCricketMatch(m, live) {
+  if (!m || !live || !m.teams) return;
+
+  // 1. If live has inningsScoreList, sync each innings to matching team
+  if (Array.isArray(live.inningsScoreList) && live.inningsScoreList.length > 0) {
+    for (const inn of live.inningsScoreList) {
+      if (inn.score == null) continue;
+      const targetTeam = m.teams.find((t) => {
+        if (inn.batTeamId && (String(t.id) === String(inn.batTeamId) || String(t.sourceId) === String(inn.batTeamId))) return true;
+        if (inn.batTeamName) {
+          const bn = normName(inn.batTeamName);
+          const tn = normName(t.name);
+          const ts = normName(t.short);
+          return (bn && (tn.includes(bn) || bn.includes(tn) || ts === bn));
+        }
+        return false;
+      });
+      if (targetTeam) {
+        if (!targetTeam.innings) targetTeam.innings = [];
+        const existing = targetTeam.innings[targetTeam.innings.length - 1];
+        if (existing) {
+          existing.runs = inn.score;
+          if (inn.wickets != null) existing.wickets = inn.wickets;
+          if (inn.overs != null) existing.overs = inn.overs;
+          existing.declared = inn.isDeclared;
+          existing.display = `${existing.runs}/${existing.wickets ?? 0}${existing.declared ? 'd' : ''}${existing.overs != null ? ` (${existing.overs} ov)` : ''}`;
+        } else {
+          targetTeam.innings.push({
+            runs: inn.score,
+            wickets: inn.wickets ?? 0,
+            overs: inn.overs ?? null,
+            declared: inn.isDeclared,
+            display: `${inn.score}/${inn.wickets ?? 0}${inn.isDeclared ? 'd' : ''}${inn.overs != null ? ` (${inn.overs} ov)` : ''}`,
+          });
+        }
+        targetTeam.score = targetTeam.innings.map((i) => i.display).join(' & ');
+      }
+    }
+  }
+
+  // 2. Direct batting team update from live.batTeamScore
+  if (live.batTeamScore != null) {
+    const batTeam = m.teams.find((t) => {
+      if (live.batTeamId && (String(t.id) === String(live.batTeamId) || String(t.sourceId) === String(live.batTeamId))) return true;
+      if (live.batTeamName) {
+        const bn = normName(live.batTeamName);
+        const tn = normName(t.name);
+        const ts = normName(t.short);
+        return (bn && (tn.includes(bn) || bn.includes(tn) || ts === bn));
+      }
+      return t.batting === true;
+    }) || m.teams[0];
+
+    if (batTeam) {
+      if (!batTeam.innings) batTeam.innings = [];
+      const curInn = batTeam.innings[batTeam.innings.length - 1];
+      if (curInn) {
+        if (live.batTeamScore >= (curInn.runs || 0)) {
+          curInn.runs = live.batTeamScore;
+          if (live.batTeamWkts != null) curInn.wickets = live.batTeamWkts;
+          if (live.batTeamOvers != null) curInn.overs = live.batTeamOvers;
+          curInn.display = `${curInn.runs}/${curInn.wickets ?? 0}${curInn.declared ? 'd' : ''}${curInn.overs != null ? ` (${curInn.overs} ov)` : ''}`;
+        }
+      } else {
+        batTeam.innings.push({
+          runs: live.batTeamScore,
+          wickets: live.batTeamWkts ?? 0,
+          overs: live.batTeamOvers ?? null,
+          declared: false,
+          display: `${live.batTeamScore}/${live.batTeamWkts ?? 0}${live.batTeamOvers != null ? ` (${live.batTeamOvers} ov)` : ''}`,
+        });
+      }
+      batTeam.score = batTeam.innings.map((i) => i.display).join(' & ');
+    }
   }
 }
 
@@ -614,7 +751,10 @@ async function cricbuzzSync() {
   const liveMatches = [...store.cricketCb.values()].filter((m) => m.status === 'live');
   for (const lm of liveMatches.slice(0, 8)) {
     const live = await getCricbuzzLive(lm.sourceId);
-    if (live) lm.live = live;
+    if (live) {
+      lm.live = live;
+      applyLiveScoreToCricketMatch(lm, live);
+    }
   }
   prune(store.cricketCb);
   return `${items.length} matches`;
@@ -719,25 +859,77 @@ function filterMatches(list, q, kind) {
         (m.teams || [m.home, m.away]).some((x) => {
           const xn = normName(x?.name);
           const xs = normName(x?.short);
-          return teamList.some((t) => (xn && xn.includes(t)) || (xs && xs === t) || (t && t.includes(xn)) || (t && t.includes(xs)));
+          return teamList.some((t) => (xn && xn.includes(t)) || (xs && xs === t));
         })
       );
     }
   }
   const dir = kind === 'results' ? -1 : 1;
-  return out.map(clean).sort((a, b) => dir * (new Date(a.startTime) - new Date(b.startTime)));
+  const qHasU19 = /u19|under-19|under 19/i.test(rawTeam);
+  const qHasWom = /women|wmn/i.test(rawTeam);
+  return out.map(clean).sort((a, b) => {
+    const aLive = a.status === 'live' ? 1 : 0;
+    const bLive = b.status === 'live' ? 1 : 0;
+    if (aLive !== bLive) return bLive - aLive;
+
+    const aU19 = /u19|under-19|under 19/i.test(a.title + (a.format || '')) ? 1 : 0;
+    const bU19 = /u19|under-19|under 19/i.test(b.title + (b.format || '')) ? 1 : 0;
+    if (!qHasU19 && aU19 !== bU19) return aU19 - bU19;
+
+    const aWom = /women|wmn/i.test(a.title + (a.format || '')) ? 1 : 0;
+    const bWom = /women|wmn/i.test(b.title + (b.format || '')) ? 1 : 0;
+    if (!qHasWom && aWom !== bWom) return aWom - bWom;
+
+    return dir * (new Date(a.startTime) - new Date(b.startTime));
+  });
 }
 
 const hasLiveCricket = () => [...store.cricketEspn.values(), ...store.cricketCb.values()].some(isHot);
 const h = (fn) => (req, res) => Promise.resolve(fn(req, res)).catch((e) => res.status(502).json({ error: e.message }));
 
 // ═══════════════════════ EMO COMPACT TRANSFORMERS ═════════════════════
+function calculateWinProb(m) {
+  if (!m || m.status !== 'live') return 50;
+  const target = m.live?.target || m.target;
+  const remRuns = m.live?.remRuns;
+  const oversRem = m.live?.oversRem;
+  const rrr = m.live?.rrr;
+  const crr = m.live?.crr;
+
+  if (target && remRuns != null && oversRem != null && oversRem > 0) {
+    const ballsRem = oversRem * 6;
+    if (remRuns <= 0) return 2;
+    const t2Batting = m.teams?.[1]?.batting === true || m.live?.batTeamId === String(m.teams?.[1]?.id);
+    const wicketsLost = m.live?.batTeamWkts ?? 3;
+    const wicketsLeft = Math.max(0, 10 - wicketsLost);
+    if (wicketsLeft <= 0) return t2Batting ? 98 : 2;
+
+    const baselineRRR = 7.5;
+    const diff = (rrr || (remRuns / (ballsRem / 6))) - baselineRRR;
+    let chaseProb = 50 - diff * 7 + (wicketsLeft - 5) * 5;
+    chaseProb = Math.max(2, Math.min(98, Math.round(chaseProb)));
+    return t2Batting ? (100 - chaseProb) : chaseProb;
+  }
+
+  if (crr && crr > 0) {
+    const fmt = (m.format || '').toUpperCase();
+    const par = fmt.includes('T20') ? 8.2 : (fmt.includes('TEST') ? 3.2 : 5.6);
+    const t1Batting = m.teams?.[0]?.batting !== false;
+    let prob = 50 + (crr - par) * 10;
+    prob = Math.max(15, Math.min(85, Math.round(prob)));
+    return t1Batting ? prob : (100 - prob);
+  }
+  return 50;
+}
+
 function toEmoCricketMatch(m) {
   if (!m) return null;
+  if (m.live) applyLiveScoreToCricketMatch(m, m.live);
   const allInnings = (m.teams || []).flatMap((t) => t.innings || []);
   const currentInnings = allInnings[allInnings.length - 1];
   const hasExplicitBatting = (m.teams || []).some((t) => t.batting === true);
   return {
+    id: m.id || '',
     title: m.title || '',
     status: m.status || 'scheduled',
     statusText: m.live?.status || m.statusText || '',
@@ -750,6 +942,12 @@ function toEmoCricketMatch(m) {
     bat2: m.live?.bat2 || '',
     bowl: m.live?.bowl || '',
     crr: m.live?.crr ?? null,
+    recent: m.live?.recent || '',
+    rrr: m.live?.rrr ?? null,
+    remRuns: m.live?.remRuns ?? null,
+    oversRem: m.live?.oversRem ?? null,
+    partner: m.live?.partner || '',
+    winProb: calculateWinProb(m),
     teams: (m.teams || []).slice(0, 2).map((t, idx) => {
       let isBatting = t.batting === true;
       if (!hasExplicitBatting && m.status === 'live') {
@@ -764,7 +962,7 @@ function toEmoCricketMatch(m) {
       }
       return {
         name: t.name || '',
-        short: t.short || '?',
+        short: makeShortName(t.short, t.name),
         batting: isBatting,
         score: t.score || '',
         innings: (t.innings || []).slice(0, 2).map((i) => ({
@@ -782,6 +980,8 @@ function toEmoFootballMatch(m) {
   if (!m) return null;
   const homeGoals = [];
   const awayGoals = [];
+  let homeGoalCount = 0;
+  let awayGoalCount = 0;
   for (const e of (m.events || [])) {
     if (e.goal || /goal|penalty/i.test(e.type || '')) {
       const athlete = e.player || '';
@@ -789,13 +989,33 @@ function toEmoFootballMatch(m) {
       const tag = e.ownGoal ? '(OG)' : (e.penalty ? '(P)' : '');
       const min = e.minute ? `${e.minute}'` : '';
       const str = `${p} ${min}${tag}`.trim();
-      if (String(e.teamId) === String(m.home?.id)) {
-        homeGoals.push(str);
-      } else if (String(e.teamId) === String(m.away?.id)) {
-        awayGoals.push(str);
+      if (e.ownGoal) {
+        if (String(e.teamId) === String(m.home?.id)) {
+          awayGoalCount++;
+          awayGoals.push(`${str}`);
+        } else {
+          homeGoalCount++;
+          homeGoals.push(`${str}`);
+        }
+      } else {
+        if (String(e.teamId) === String(m.home?.id)) {
+          homeGoalCount++;
+          homeGoals.push(str);
+        } else if (String(e.teamId) === String(m.away?.id)) {
+          awayGoalCount++;
+          awayGoals.push(str);
+        }
       }
     }
   }
+
+  let hScore = m.home?.score ?? null;
+  let aScore = m.away?.score ?? null;
+  if (m.status !== 'scheduled') {
+    if (homeGoalCount > (hScore ?? 0)) hScore = homeGoalCount;
+    if (awayGoalCount > (aScore ?? 0)) aScore = awayGoalCount;
+  }
+
   return {
     startTime: m.startTime || '',
     status: m.status || 'scheduled',
@@ -805,15 +1025,15 @@ function toEmoFootballMatch(m) {
     league: m.league?.name || '',
     home: {
       name: m.home?.name || '',
-      short: m.home?.short || '?',
-      score: m.home?.score ?? null,
+      short: makeShortName(m.home?.short, m.home?.name),
+      score: hScore,
       form: m.home?.form || '',
       scorers: homeGoals.slice(0, 3).join(', '),
     },
     away: {
       name: m.away?.name || '',
-      short: m.away?.short || '?',
-      score: m.away?.score ?? null,
+      short: makeShortName(m.away?.short, m.away?.name),
+      score: aScore,
       form: m.away?.form || '',
       scorers: awayGoals.slice(0, 3).join(', '),
     },
@@ -825,7 +1045,7 @@ function toEmoStandings(groups) {
     group: g.group || null,
     table: (g.table || []).slice(0, 20).map((e) => ({
       rank: e.rank,
-      short: e.short || '?',
+      short: makeShortName(e.short, e.team),
       played: e.played ?? 0,
       gd: e.gd ?? 0,
       points: e.points ?? 0,
@@ -984,7 +1204,7 @@ for (const kind of ['live', 'fixtures', 'results', 'all']) {
     }
     res.json(
       filterMatches(cricketMatches(), req.query, kind)
-        .slice(0, req.query.limit ? parseInt(req.query.limit) : 10)
+        .slice(0, req.query.limit ? parseInt(req.query.limit) : 30)
         .map(toEmoCricketMatch)
     );
   });
