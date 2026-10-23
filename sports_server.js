@@ -930,6 +930,7 @@ function toEmoCricketMatch(m) {
   const hasExplicitBatting = (m.teams || []).some((t) => t.batting === true);
   return {
     id: m.id || '',
+    sport: 'cricket',
     title: m.title || '',
     status: m.status || 'scheduled',
     statusText: m.live?.status || m.statusText || '',
@@ -1017,12 +1018,16 @@ function toEmoFootballMatch(m) {
   }
 
   return {
+    id: m.id || '',
+    sport: 'football',
+    title: m.title || (m.home && m.away ? `${m.home.name || ''} vs ${m.away.name || ''}` : ''),
     startTime: m.startTime || '',
     status: m.status || 'scheduled',
     statusText: m.statusText || '',
     clock: m.clock || null,
     venue: m.venue || '',
     league: m.league?.name || '',
+    leagueSlug: m.league?.slug || '',
     home: {
       name: m.home?.name || '',
       short: makeShortName(m.home?.short, m.home?.name),
