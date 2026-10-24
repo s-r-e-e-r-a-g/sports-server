@@ -1031,14 +1031,14 @@ function toEmoFootballMatch(m) {
       short: makeShortName(m.home?.short, m.home?.name),
       score: hScore,
       form: m.home?.form || '',
-      scorers: homeGoals.slice(0, 3).join(', '),
+      scorers: homeGoals.slice(0, 4).join(', '),
     },
     away: {
       name: m.away?.name || '',
       short: makeShortName(m.away?.short, m.away?.name),
       score: aScore,
       form: m.away?.form || '',
-      scorers: awayGoals.slice(0, 3).join(', '),
+      scorers: awayGoals.slice(0, 4).join(', '),
     },
   };
 }
