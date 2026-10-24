@@ -162,6 +162,9 @@ function upsert(map, m) {
   const fp = fingerprint(m);
   const changed = !prev || prev._fp !== fp;
   const next = { ...prev, ...m, _fp: fp, seenAt: Date.now(), updatedAt: changed ? new Date().toISOString() : prev.updatedAt };
+  if (m.status === 'finished') {
+    delete next.live;
+  }
   map.set(m.id, next);
   if (changed && (m.status === 'live' || (prev && prev.status !== m.status))) broadcast('update', clean(next));
 }
@@ -243,21 +246,16 @@ function normFootball(ev, slug, leagueName) {
   let homeGoalsFromEvents = 0;
   let awayGoalsFromEvents = 0;
   for (const e of events) {
-    if (e.goal || /goal|penalty/i.test(e.type || '')) {
-      if (e.ownGoal) {
-        if (String(e.teamId) === String(homeComp?.team?.id)) awayGoalsFromEvents++;
-        else if (String(e.teamId) === String(awayComp?.team?.id)) homeGoalsFromEvents++;
-      } else {
-        if (String(e.teamId) === String(homeComp?.team?.id)) homeGoalsFromEvents++;
-        else if (String(e.teamId) === String(awayComp?.team?.id)) awayGoalsFromEvents++;
-      }
+    if (e.goal || (e.scoringPlay && /goal|penalty/i.test(e.type || ''))) {
+      if (String(e.teamId) === String(homeComp?.team?.id)) homeGoalsFromEvents++;
+      else if (String(e.teamId) === String(awayComp?.team?.id)) awayGoalsFromEvents++;
     }
   }
 
   const team = (c, goalsFromEvents) => {
     if (!c) return null;
     let s = (status === 'scheduled' || c.score == null || c.score === '') ? null : Number(c.score);
-    if (status !== 'scheduled' && goalsFromEvents > (s ?? 0)) {
+    if (status !== 'scheduled' && (s == null || isNaN(s))) {
       s = goalsFromEvents;
     }
     return {
@@ -748,6 +746,9 @@ async function cricbuzzSync() {
   const items = extractCricbuzz(html);
   if (!items.length) throw new Error('Page loaded but no match data found — Cricbuzz layout may have changed');
   for (const it of items) upsert(store.cricketCb, normCricbuzz(it));
+  for (const m of store.cricketCb.values()) {
+    if (m.status === 'finished' && m.live) delete m.live;
+  }
   const liveMatches = [...store.cricketCb.values()].filter((m) => m.status === 'live');
   for (const lm of liveMatches.slice(0, 8)) {
     const live = await getCricbuzzLive(lm.sourceId);
@@ -813,16 +814,22 @@ function cricketMatches() {
     target.cricbuzzId = cb.sourceId;
     target.cricbuzzUrl = cb.url;
     // Freshest wins: whichever source shows more of the match played
-    if (cb.status !== 'scheduled' && progress(cb) > progress(target)) {
+    const cbMoreProgress = progress(cb) > progress(target);
+    const cbFinished = cb.status === 'finished';
+    if (cb.status !== 'scheduled' && (cbMoreProgress || cbFinished)) {
       target.teams = target.teams.map((t) => {
         const alt = cb.teams.find((x) => normName(x.name) === normName(t.name) || normName(x.short) === normName(t.short));
         return alt ? { ...t, score: alt.score, innings: alt.innings } : t;
       });
       target.statusText = cb.statusText || target.statusText;
       target.scoreSource = 'cricbuzz';
-      if (cb.status === 'finished' || target.status === 'scheduled') target.status = cb.status;
+      if (cbFinished || target.status === 'scheduled') target.status = cb.status;
     }
-    if (cb.live) target.live = cb.live;
+    if (cb.live && target.status !== 'finished') target.live = cb.live;
+    if (target.status === 'finished') {
+      delete target.live;
+      delete cb.live;
+    }
   }
   return merged;
 }
@@ -924,7 +931,8 @@ function calculateWinProb(m) {
 
 function toEmoCricketMatch(m) {
   if (!m) return null;
-  if (m.live) applyLiveScoreToCricketMatch(m, m.live);
+  const isFinished = (m.status === 'finished');
+  if (!isFinished && m.live) applyLiveScoreToCricketMatch(m, m.live);
   const allInnings = (m.teams || []).flatMap((t) => t.innings || []);
   const currentInnings = allInnings[allInnings.length - 1];
   const hasExplicitBatting = (m.teams || []).some((t) => t.batting === true);
@@ -933,25 +941,25 @@ function toEmoCricketMatch(m) {
     sport: 'cricket',
     title: m.title || '',
     status: m.status || 'scheduled',
-    statusText: m.live?.status || m.statusText || '',
+    statusText: isFinished ? (m.statusText || 'FT') : (m.live?.status || m.statusText || ''),
     format: m.format || '',
     startTime: m.startTime || '',
     venue: m.venue || '',
     series: m.series?.name || '',
-    target: m.live?.target ?? currentInnings?.target ?? null,
-    bat1: m.live?.bat1 || '',
-    bat2: m.live?.bat2 || '',
-    bowl: m.live?.bowl || '',
-    crr: m.live?.crr ?? null,
-    recent: m.live?.recent || '',
-    rrr: m.live?.rrr ?? null,
-    remRuns: m.live?.remRuns ?? null,
-    oversRem: m.live?.oversRem ?? null,
-    partner: m.live?.partner || '',
-    winProb: calculateWinProb(m),
+    target: isFinished ? null : (m.live?.target ?? currentInnings?.target ?? null),
+    bat1: isFinished ? '' : (m.live?.bat1 || ''),
+    bat2: isFinished ? '' : (m.live?.bat2 || ''),
+    bowl: isFinished ? '' : (m.live?.bowl || ''),
+    crr: isFinished ? null : (m.live?.crr ?? null),
+    recent: isFinished ? '' : (m.live?.recent || ''),
+    rrr: isFinished ? null : (m.live?.rrr ?? null),
+    remRuns: isFinished ? null : (m.live?.remRuns ?? null),
+    oversRem: isFinished ? null : (m.live?.oversRem ?? null),
+    partner: isFinished ? '' : (m.live?.partner || ''),
+    winProb: isFinished ? null : calculateWinProb(m),
     teams: (m.teams || []).slice(0, 2).map((t, idx) => {
-      let isBatting = t.batting === true;
-      if (!hasExplicitBatting && m.status === 'live') {
+      let isBatting = isFinished ? false : (t.batting === true);
+      if (!isFinished && !hasExplicitBatting && m.status === 'live') {
         if (m.live?.batTeamId && (String(t.id) === m.live.batTeamId || String(t.sourceId) === m.live.batTeamId)) {
           isBatting = true;
         } else if (m.live?.batTeamName && normName(t.name).includes(normName(m.live.batTeamName))) {
@@ -990,31 +998,21 @@ function toEmoFootballMatch(m) {
       const tag = e.ownGoal ? '(OG)' : (e.penalty ? '(P)' : '');
       const min = e.minute ? `${e.minute}'` : '';
       const str = `${p} ${min}${tag}`.trim();
-      if (e.ownGoal) {
-        if (String(e.teamId) === String(m.home?.id)) {
-          awayGoalCount++;
-          awayGoals.push(`${str}`);
-        } else {
-          homeGoalCount++;
-          homeGoals.push(`${str}`);
-        }
-      } else {
-        if (String(e.teamId) === String(m.home?.id)) {
-          homeGoalCount++;
-          homeGoals.push(str);
-        } else if (String(e.teamId) === String(m.away?.id)) {
-          awayGoalCount++;
-          awayGoals.push(str);
-        }
+      if (String(e.teamId) === String(m.home?.id)) {
+        homeGoalCount++;
+        homeGoals.push(str);
+      } else if (String(e.teamId) === String(m.away?.id)) {
+        awayGoalCount++;
+        awayGoals.push(str);
       }
     }
   }
 
-  let hScore = m.home?.score ?? null;
-  let aScore = m.away?.score ?? null;
+  let hScore = m.home?.score != null && !isNaN(Number(m.home.score)) ? Number(m.home.score) : null;
+  let aScore = m.away?.score != null && !isNaN(Number(m.away.score)) ? Number(m.away.score) : null;
   if (m.status !== 'scheduled') {
-    if (homeGoalCount > (hScore ?? 0)) hScore = homeGoalCount;
-    if (awayGoalCount > (aScore ?? 0)) aScore = awayGoalCount;
+    if (hScore == null && homeGoalCount > 0) hScore = homeGoalCount;
+    if (aScore == null && awayGoalCount > 0) aScore = awayGoalCount;
   }
 
   return {
