@@ -368,6 +368,37 @@ async function footballDetail(m) {
   };
 }
 
+const matchStatsCache = new Map();
+async function getMatchStats(slug, eventId, isLive, mHomeId, mAwayId) {
+  if (!slug || !eventId) return null;
+  const cacheKey = `${slug}:${eventId}`;
+  const hit = matchStatsCache.get(cacheKey);
+  const maxAge = isLive ? 30_000 : 6 * 3600_000;
+  if (hit && (Date.now() - hit.at < maxAge)) return hit.data;
+  try {
+    const d = await http(`${ESPN}/site/v2/sports/soccer/${slug}/summary?event=${eventId}`);
+    const teams = d.boxscore?.teams || [];
+    if (!teams.length) return null;
+    const findStat = (t, name) => {
+      const s = (t?.statistics || []).find((x) => x.name === name);
+      return s ? parseFloat(s.displayValue) : null;
+    };
+    const hTeam = teams.find((t) => t.homeAway === 'home' || (mHomeId && String(t.team?.id) === String(mHomeId))) || teams[0];
+    const aTeam = teams.find((t) => t.homeAway === 'away' || (mAwayId && String(t.team?.id) === String(mAwayId))) || teams[1];
+    const data = {
+      poss: [Math.round(findStat(hTeam, 'possessionPct') ?? 50), Math.round(findStat(aTeam, 'possessionPct') ?? 50)],
+      shots: [Math.round(findStat(hTeam, 'totalShots') ?? 0), Math.round(findStat(aTeam, 'totalShots') ?? 0)],
+      sot: [Math.round(findStat(hTeam, 'shotsOnTarget') ?? 0), Math.round(findStat(aTeam, 'shotsOnTarget') ?? 0)],
+      corn: [Math.round(findStat(hTeam, 'wonCorners') ?? 0), Math.round(findStat(aTeam, 'wonCorners') ?? 0)],
+      fouls: [Math.round(findStat(hTeam, 'foulsCommitted') ?? 0), Math.round(findStat(aTeam, 'foulsCommitted') ?? 0)],
+    };
+    matchStatsCache.set(cacheKey, { at: Date.now(), data });
+    return data;
+  } catch (e) {
+    return null;
+  }
+}
+
 async function footballStandings(slug) {
   const d = await http(`${ESPN}/v2/sports/soccer/${slug}/standings`);
   const groups = d.children?.length ? d.children : [d];
@@ -1040,6 +1071,7 @@ function toEmoFootballMatch(m) {
       form: m.away?.form || '',
       scorers: awayGoals.slice(0, 4).join(', '),
     },
+    stats: m.stats || null,
   };
 }
 
@@ -1195,11 +1227,16 @@ for (const kind of ['live', 'fixtures', 'results', 'all']) {
         else if (store.football.size === 0) await footballScheduleSync();
       } catch {}
     }
-    res.json(
-      filterMatches([...store.football.values()], req.query, kind)
-        .slice(0, req.query.limit ? parseInt(req.query.limit) : 12)
-        .map(toEmoFootballMatch)
+    const matches = filterMatches([...store.football.values()], req.query, kind)
+      .slice(0, req.query.limit ? parseInt(req.query.limit) : 12);
+    await Promise.all(
+      matches.map(async (m) => {
+        if (m.status !== 'scheduled' && !m.stats) {
+          m.stats = await getMatchStats(m.league?.slug, m.sourceId, m.status === 'live', m.home?.id, m.away?.id);
+        }
+      })
     );
+    res.json(matches.map(toEmoFootballMatch));
   });
   app.get(`/api/emo/cricket/${kind}`, async (req, res) => {
     if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) {
@@ -1220,6 +1257,9 @@ app.get('/api/emo/football/leagues', (req, res) =>
 app.get('/api/emo/football/match/:id', h(async (req, res) => {
   const m = store.football.get(req.params.id);
   if (!m) return res.status(404).json({ error: 'Match not found' });
+  if (m.status !== 'scheduled' && !m.stats) {
+    m.stats = await getMatchStats(m.league?.slug, m.sourceId, m.status === 'live', m.home?.id, m.away?.id);
+  }
   res.json(toEmoFootballMatch(m));
 }));
 
