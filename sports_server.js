@@ -408,22 +408,157 @@ async function footballStandings(slug) {
       .map((e) => {
         const s = Object.fromEntries((e.stats || []).map((x) => [x.name, x.value]));
         return {
-          rank: s.rank,
+          rank: Number(s.rank ?? 0),
+          id: String(e.team?.id || ''),
           team: e.team?.displayName,
           short: makeShortName(e.team?.abbreviation, e.team?.displayName),
           logo: e.team?.logos?.[0]?.href,
-          played: s.gamesPlayed,
-          won: s.wins,
-          drawn: s.ties,
-          lost: s.losses,
-          gf: s.pointsFor,
-          ga: s.pointsAgainst,
-          gd: s.pointDifferential,
-          points: s.points,
+          played: Number(s.gamesPlayed ?? 0),
+          won: Number(s.wins ?? 0),
+          drawn: Number(s.ties ?? 0),
+          lost: Number(s.losses ?? 0),
+          gf: Number(s.pointsFor ?? 0),
+          ga: Number(s.pointsAgainst ?? 0),
+          gd: Number(s.pointDifferential ?? 0),
+          points: Number(s.points ?? 0),
         };
       })
       .sort((a, b) => (a.rank ?? 99) - (b.rank ?? 99)),
   }));
+}
+
+async function getLiveStandingsForLeague(slug, liveMatchesForLeague = []) {
+  if (!slug) return null;
+  try {
+    const rawGroups = await cached(`st:${slug}`, 5 * 60_000, () => footballStandings(slug));
+    if (!rawGroups || !rawGroups.length) return null;
+
+    const groups = JSON.parse(JSON.stringify(rawGroups));
+
+    for (const g of groups) {
+      if (!g.table || !g.table.length) continue;
+
+      const findEntry = (t) => {
+        if (!t) return null;
+        const tid = String(t.id || '');
+        const tname = (t.name || t.team || '').toLowerCase().trim();
+        const tshort = (t.short || '').toLowerCase().trim();
+        return g.table.find((e) => {
+          if (tid && String(e.id || '') === tid) return true;
+          const ename = (e.team || '').toLowerCase().trim();
+          const eshort = (e.short || '').toLowerCase().trim();
+          if (tname && (ename === tname || ename.includes(tname) || tname.includes(ename))) return true;
+          if (tshort && eshort === tshort) return true;
+          return false;
+        });
+      };
+
+      for (const e of g.table) {
+        e.baseRank = Number(e.rank || 0);
+        e.livePoints = Number(e.points || 0);
+        e.liveGd = Number(e.gd || 0);
+        e.liveGf = Number(e.gf || 0);
+        e.liveGa = Number(e.ga || 0);
+        e.livePlayed = Number(e.played || 0);
+      }
+
+      for (const m of liveMatchesForLeague) {
+        if (m.status !== 'live') continue;
+        const hEntry = findEntry(m.home);
+        const aEntry = findEntry(m.away);
+        if (!hEntry || !aEntry) continue;
+
+        const hs = Number(m.home?.score ?? 0);
+        const as = Number(m.away?.score ?? 0);
+
+        hEntry.livePlayed += 1;
+        aEntry.livePlayed += 1;
+        hEntry.liveGf += hs;
+        hEntry.liveGa += as;
+        hEntry.liveGd = hEntry.liveGf - hEntry.liveGa;
+        aEntry.liveGf += as;
+        aEntry.liveGa += hs;
+        aEntry.liveGd = aEntry.liveGf - aEntry.liveGa;
+
+        if (hs > as) {
+          hEntry.livePoints += 3;
+        } else if (hs === as) {
+          hEntry.livePoints += 1;
+          aEntry.livePoints += 1;
+        } else {
+          aEntry.livePoints += 3;
+        }
+      }
+
+      g.table.sort((a, b) => {
+        if (b.livePoints !== a.livePoints) return b.livePoints - a.livePoints;
+        if (b.liveGd !== a.liveGd) return b.liveGd - a.liveGd;
+        if (b.liveGf !== a.liveGf) return b.liveGf - a.liveGf;
+        return (a.baseRank || 99) - (b.baseRank || 99);
+      });
+
+      for (let i = 0; i < g.table.length; i++) {
+        g.table[i].liveRank = i + 1;
+      }
+    }
+
+    return groups;
+  } catch (err) {
+    return null;
+  }
+}
+
+function findTeamRank(groups, team) {
+  if (!groups || !team) return { pos: null, livePos: null };
+  const tid = String(team.id || '');
+  const tname = (team.name || '').toLowerCase().trim();
+  const tshort = (team.short || '').toLowerCase().trim();
+
+  for (const g of groups) {
+    if (!g.table) continue;
+    const entry = g.table.find((e) => {
+      if (tid && String(e.id || '') === tid) return true;
+      const ename = (e.team || '').toLowerCase().trim();
+      const eshort = (e.short || '').toLowerCase().trim();
+      if (tname && (ename === tname || ename.includes(tname) || tname.includes(ename))) return true;
+      if (tshort && eshort === tshort) return true;
+      return false;
+    });
+    if (entry) {
+      return {
+        pos: entry.baseRank || entry.rank || null,
+        livePos: entry.liveRank || entry.baseRank || entry.rank || null,
+      };
+    }
+  }
+  return { pos: null, livePos: null };
+}
+
+async function enrichMatchesWithStandings(matches) {
+  if (!matches || !matches.length) return;
+  const leagues = [...new Set(matches.map((m) => m.league?.slug).filter(Boolean))];
+  const allLive = [...store.football.values()].filter((m) => m.status === 'live');
+  const leagueStandings = {};
+
+  await Promise.all(
+    leagues.map(async (slug) => {
+      const liveForLeague = allLive.filter((m) => m.league?.slug === slug);
+      leagueStandings[slug] = await getLiveStandingsForLeague(slug, liveForLeague);
+    })
+  );
+
+  for (const m of matches) {
+    const slug = m.league?.slug;
+    const groups = leagueStandings[slug];
+    if (groups && m.home && m.away) {
+      const hRank = findTeamRank(groups, m.home);
+      const aRank = findTeamRank(groups, m.away);
+      m.home.pos = hRank.pos;
+      m.home.livePos = hRank.livePos;
+      m.away.pos = aRank.pos;
+      m.away.livePos = aRank.livePos;
+    }
+  }
 }
 
 function normalizeOvers(ov) {
@@ -1061,6 +1196,8 @@ function toEmoFootballMatch(m) {
       name: m.home?.name || '',
       short: makeShortName(m.home?.short, m.home?.name),
       score: hScore,
+      pos: m.home?.pos ?? null,
+      livePos: m.home?.livePos ?? null,
       form: m.home?.form || '',
       scorers: homeGoals.slice(0, 4).join(', '),
     },
@@ -1068,6 +1205,8 @@ function toEmoFootballMatch(m) {
       name: m.away?.name || '',
       short: makeShortName(m.away?.short, m.away?.name),
       score: aScore,
+      pos: m.away?.pos ?? null,
+      livePos: m.away?.livePos ?? null,
       form: m.away?.form || '',
       scorers: awayGoals.slice(0, 4).join(', '),
     },
@@ -1211,8 +1350,10 @@ app.get('/api/emo/health', (req, res) =>
 app.get('/api/emo/live', async (req, res) => {
   if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
   if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
+  const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
+  await enrichMatchesWithStandings(fbMatches);
   res.json({
-    football: filterMatches([...store.football.values()], req.query, 'live').map(toEmoFootballMatch),
+    football: fbMatches.map(toEmoFootballMatch),
     cricket: filterMatches(cricketMatches(), req.query, 'live').map(toEmoCricketMatch),
   });
 });
@@ -1236,6 +1377,7 @@ for (const kind of ['live', 'fixtures', 'results', 'all']) {
         }
       })
     );
+    await enrichMatchesWithStandings(matches);
     res.json(matches.map(toEmoFootballMatch));
   });
   app.get(`/api/emo/cricket/${kind}`, async (req, res) => {
@@ -1260,6 +1402,7 @@ app.get('/api/emo/football/match/:id', h(async (req, res) => {
   if (m.status !== 'scheduled' && !m.stats) {
     m.stats = await getMatchStats(m.league?.slug, m.sourceId, m.status === 'live', m.home?.id, m.away?.id);
   }
+  await enrichMatchesWithStandings([m]);
   res.json(toEmoFootballMatch(m));
 }));
 
