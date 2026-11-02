@@ -33,8 +33,8 @@ const CONFIG = {
       'ind.2': 'Indian Football League',
       'usa.1': 'MLS',
     },
-    daysBack: 3,   // results window
-    daysAhead: 10, // fixtures window
+    daysBack: 7,   // results window
+    daysAhead: 14, // fixtures window
   },
 
   cricket: {
@@ -1290,7 +1290,10 @@ for (const kind of ['live', 'fixtures', 'results', 'all']) {
     const hasLeague = !league || [...store.football.values()].some((m) => m.league?.slug === league);
     if (store.football.size === 0 || !hasLeague) {
       try {
-        if (league && CONFIG.football.leagues[league]) await fetchFootballLeague(league);
+        const now = new Date();
+        const from = addDays(now, -CONFIG.football.daysBack);
+        const to = addDays(now, CONFIG.football.daysAhead);
+        if (league && CONFIG.football.leagues[league]) await fetchFootballLeague(league, from, to);
         else if (store.football.size === 0) await footballScheduleSync();
       } catch {}
     }
@@ -1365,7 +1368,10 @@ for (const kind of ['live', 'fixtures', 'results', 'all']) {
     const hasLeague = !league || [...store.football.values()].some((m) => m.league?.slug === league);
     if (store.football.size === 0 || !hasLeague) {
       try {
-        if (league && CONFIG.football.leagues[league]) await fetchFootballLeague(league);
+        const now = new Date();
+        const from = addDays(now, -CONFIG.football.daysBack);
+        const to = addDays(now, CONFIG.football.daysAhead);
+        if (league && CONFIG.football.leagues[league]) await fetchFootballLeague(league, from, to);
         else if (store.football.size === 0) await footballScheduleSync();
       } catch {}
     }
