@@ -30,6 +30,7 @@ const CONFIG = {
       'uefa.champions': 'UEFA Champions League',
       'uefa.europa': 'UEFA Europa League',
       'ind.1': 'Indian Super League',
+      'ind.2': 'Indian Football League',
       'usa.1': 'MLS',
     },
     daysBack: 3,   // results window
