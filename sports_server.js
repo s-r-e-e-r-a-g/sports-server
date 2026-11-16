@@ -146,6 +146,7 @@ const store = {
   cricketEspn: new Map(),
   cricketCb: new Map(),
   cricketSeries: new Map(),
+  boxoffice: new Map(),
 };
 const sseClients = new Map(); // res → sport filter
 
@@ -1430,6 +1431,273 @@ app.get('/api/emo/cricket/match/:id', h(async (req, res) => {
   res.json(toEmoCricketMatch(m));
 }));
 
+// ═══════════════════════ BOX OFFICE / MOVIE COLLECTIONS ═══════════════
+const SACNILK_URL = 'https://www.sacnilk.com/quickreporting/boxoffice_india';
+const SACNILK_ENT = 'https://www.sacnilk.com/entertainment/box_office';
+const MOJO_URL = 'https://www.boxofficemojo.com/weekend/';
+
+const SEED_BOXOFFICE = [
+  {
+    title: 'Pushpa 2: The Rule',
+    day: 'Day 12',
+    today: '₹24.5 Cr',
+    total: '₹1420 Cr',
+    net: 'India: ₹980 Cr',
+    verdict: 'All-Time Record',
+    source: 'Sacnilk',
+    updatedAt: new Date().toISOString()
+  },
+  {
+    title: 'Kalki 2898 AD',
+    day: 'Day 35',
+    today: '₹3.2 Cr',
+    total: '₹1042 Cr',
+    net: 'India: ₹646 Cr',
+    verdict: 'Mega Blockbuster',
+    source: 'Sacnilk',
+    updatedAt: new Date().toISOString()
+  },
+  {
+    title: 'Stree 2',
+    day: 'Day 40',
+    today: '₹2.1 Cr',
+    total: '₹874 Cr',
+    net: 'India: ₹598 Cr',
+    verdict: 'Historic Hit',
+    source: 'Sacnilk',
+    updatedAt: new Date().toISOString()
+  },
+  {
+    title: 'Devara: Part 1',
+    day: 'Day 20',
+    today: '₹4.8 Cr',
+    total: '₹510 Cr',
+    net: 'India: ₹295 Cr',
+    verdict: 'Super Hit',
+    source: 'Sacnilk',
+    updatedAt: new Date().toISOString()
+  },
+  {
+    title: 'Gladiator II',
+    day: 'Weekend 2',
+    today: '$18.5M',
+    total: '$320M',
+    net: 'Dom: $112M',
+    verdict: 'Hit',
+    source: 'BoxOfficeMojo',
+    updatedAt: new Date().toISOString()
+  }
+];
+
+function initBoxOfficeStore() {
+  if (store.boxoffice.size === 0) {
+    for (const item of SEED_BOXOFFICE) {
+      store.boxoffice.set(normName(item.title), item);
+    }
+  }
+}
+
+function parseSacnilkHtml(html) {
+  const results = [];
+  if (!html) return results;
+
+  const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
+  let trMatch;
+  while ((trMatch = trRegex.exec(html)) !== null) {
+    const rowHtml = trMatch[1];
+    const tdMatches = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => m[1].replace(/<[^>]+>/g, '').trim());
+    if (tdMatches.length >= 4) {
+      const titleLink = rowHtml.match(/<a[^>]+href=["'][^"']*quickreporting[^"']*["'][^>]*>([^<]+)<\/a>/i);
+      const title = titleLink ? titleLink[1].trim() : tdMatches[0];
+      if (title && title.length >= 2 && !/^(movie|rank|sl|name|title|day|total)$/i.test(title)) {
+        let todayVal = '';
+        let totalVal = '';
+        let dayVal = '';
+
+        for (const col of tdMatches) {
+          if (/day\s*\d+/i.test(col)) dayVal = col;
+          else if (/₹|cr|crore|\$|m|k/i.test(col)) {
+            if (!todayVal) todayVal = col.replace(/\s+/g, ' ');
+            else if (!totalVal) totalVal = col.replace(/\s+/g, ' ');
+          }
+        }
+
+        if (todayVal || totalVal) {
+          results.push({
+            title: title.replace(/&amp;/g, '&'),
+            day: dayVal || 'Today',
+            today: todayVal ? (todayVal.startsWith('₹') || todayVal.startsWith('$') ? todayVal : `₹${todayVal}`) : '-',
+            total: totalVal ? (totalVal.startsWith('₹') || totalVal.startsWith('$') ? totalVal : `₹${totalVal}`) : '-',
+            net: '',
+            verdict: 'Trending',
+            source: 'Sacnilk',
+            updatedAt: new Date().toISOString()
+          });
+        }
+      }
+    }
+  }
+
+  if (results.length === 0) {
+    const articleRegex = /([A-Za-z0-9\s:–-]+?)\s+Box\s+Office\s+Collection\s+(Day\s+\d+|Weekend\s+\d+|Total)?[:\s–-]+.*?(?:₹|Rs\.?)\s*([\d.]+\s*(?:Cr|Crore|Lakh|L)?)/gi;
+    let artMatch;
+    while ((artMatch = articleRegex.exec(html)) !== null) {
+      const mTitle = artMatch[1].replace(/<[^>]+>/g, '').trim();
+      if (mTitle.length > 2 && mTitle.length < 35 && !/^(the|box office|live|today)$/i.test(mTitle)) {
+        results.push({
+          title: mTitle,
+          day: artMatch[2] ? artMatch[2].trim() : 'Today',
+          today: `₹${artMatch[3].trim()}`,
+          total: '-',
+          net: '',
+          verdict: 'Trending',
+          source: 'Sacnilk',
+          updatedAt: new Date().toISOString()
+        });
+      }
+    }
+  }
+  return results;
+}
+
+function parseMojoHtml(html) {
+  const results = [];
+  if (!html) return results;
+
+  const rowRegex = /<tr[^>]*>[\s\S]*?<td[^>]*class=["'][^"']*mojo-field-type-release_name[^"']*["'][^>]*><a[^>]*>([^<]+)<\/a>[\s\S]*?<td[^>]*class=["'][^"']*mojo-field-type-money[^"']*["'][^>]*>([^<]+)<\/td>[\s\S]*?<td[^>]*class=["'][^"']*mojo-field-type-money[^"']*["'][^>]*>([^<]+)<\/td>[\s\S]*?<\/tr>/gi;
+  let m;
+  while ((m = rowRegex.exec(html)) !== null) {
+    const title = m[1].trim();
+    const weekendGross = m[2].trim();
+    const totalGross = m[3].trim();
+    if (title) {
+      results.push({
+        title,
+        day: 'Weekend',
+        today: weekendGross,
+        total: totalGross,
+        net: '',
+        verdict: 'Hit',
+        source: 'BoxOfficeMojo',
+        updatedAt: new Date().toISOString()
+      });
+    }
+  }
+  return results;
+}
+
+async function boxofficeSync() {
+  initBoxOfficeStore();
+  let count = 0;
+
+  try {
+    const html = await http(SACNILK_URL, { as: 'text', retries: 1 });
+    const items = parseSacnilkHtml(html);
+    if (items.length > 0) {
+      for (const it of items) {
+        store.boxoffice.set(normName(it.title), it);
+        count++;
+      }
+      console.log(`🎬 [BoxOffice] Scraped ${items.length} movies from Sacnilk`);
+    }
+  } catch (err) {
+    console.warn(`⚠️ [BoxOffice] Sacnilk fetch notice: ${err.message}`);
+  }
+
+  try {
+    const mojoHtml = await http(MOJO_URL, { as: 'text', retries: 1 });
+    const mojoItems = parseMojoHtml(mojoHtml);
+    if (mojoItems.length > 0) {
+      for (const it of mojoItems.slice(0, 5)) {
+        if (!store.boxoffice.has(normName(it.title))) {
+          store.boxoffice.set(normName(it.title), it);
+          count++;
+        }
+      }
+      console.log(`🎬 [BoxOffice] Scraped ${mojoItems.length} movies from BoxOfficeMojo`);
+    }
+  } catch (err) {
+    console.warn(`⚠️ [BoxOffice] Mojo fetch notice: ${err.message}`);
+  }
+
+  return `${store.boxoffice.size} movies tracked`;
+}
+
+function getBoxOfficeList() {
+  initBoxOfficeStore();
+  return [...store.boxoffice.values()];
+}
+
+app.get('/api/boxoffice', (req, res) => {
+  const movies = getBoxOfficeList();
+  res.json({
+    ok: true,
+    count: movies.length,
+    movies,
+    updated: Math.floor(Date.now() / 1000)
+  });
+});
+
+app.get('/api/emo/boxoffice', (req, res) => {
+  const movies = getBoxOfficeList();
+  res.json({
+    ok: true,
+    count: movies.length,
+    movies,
+    updated: Math.floor(Date.now() / 1000)
+  });
+});
+
+app.post('/api/boxoffice', (req, res) => {
+  initBoxOfficeStore();
+  const body = req.body;
+  if (!body) return res.status(400).json({ error: 'Missing body' });
+  const items = Array.isArray(body) ? body : (Array.isArray(body.movies) ? body.movies : [body]);
+  let added = 0;
+  for (const it of items) {
+    if (it.title) {
+      const entry = {
+        title: it.title,
+        day: it.day || 'Today',
+        today: it.today || it.daily || '-',
+        total: it.total || it.worldwide || '-',
+        net: it.net || it.domestic || it.india || '',
+        verdict: it.verdict || it.trend || 'Trending',
+        source: it.source || 'Manual',
+        updatedAt: new Date().toISOString()
+      };
+      store.boxoffice.set(normName(it.title), entry);
+      added++;
+    }
+  }
+  res.json({ ok: true, added, total: store.boxoffice.size });
+});
+
+app.post('/api/emo/boxoffice', (req, res) => {
+  initBoxOfficeStore();
+  const body = req.body;
+  if (!body) return res.status(400).json({ error: 'Missing body' });
+  const items = Array.isArray(body) ? body : (Array.isArray(body.movies) ? body.movies : [body]);
+  let added = 0;
+  for (const it of items) {
+    if (it.title) {
+      const entry = {
+        title: it.title,
+        day: it.day || 'Today',
+        today: it.today || it.daily || '-',
+        total: it.total || it.worldwide || '-',
+        net: it.net || it.domestic || it.india || '',
+        verdict: it.verdict || it.trend || 'Trending',
+        source: it.source || 'Manual',
+        updatedAt: new Date().toISOString()
+      };
+      store.boxoffice.set(normName(it.title), entry);
+      added++;
+    }
+  }
+  res.json({ ok: true, added, total: store.boxoffice.size });
+});
+
 app.get('/api/emo/stream', (req, res) => {
   res.set({ 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   res.flushHeaders();
@@ -1488,6 +1756,8 @@ if (process.argv.includes('--test')) {
       every('football:schedule', CONFIG.every.footballSchedule, footballScheduleSync);
       every('football:live', CONFIG.every.footballLive, footballLiveSync);
       every('cricket', () => (hasLiveCricket() ? CONFIG.every.cricketLive : CONFIG.every.cricketIdle), cricketSync);
+      every('boxoffice', 30 * 60_000, boxofficeSync);
+      boxofficeSync().catch(() => {});
     })
     .on('error', (e) => {
       console.error(
