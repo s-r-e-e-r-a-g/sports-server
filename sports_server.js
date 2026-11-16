@@ -1432,62 +1432,54 @@ app.get('/api/emo/cricket/match/:id', h(async (req, res) => {
 }));
 
 // ═══════════════════════ BOX OFFICE / MOVIE COLLECTIONS ═══════════════
-const SACNILK_URL = 'https://www.sacnilk.com/quickreporting/boxoffice_india';
-const SACNILK_ENT = 'https://www.sacnilk.com/entertainment/box_office';
+const SACNILK_LIVE = 'https://www.sacnilk.com/live';
+const SACNILK_BASE = 'https://www.sacnilk.com';
 const MOJO_URL = 'https://www.boxofficemojo.com/weekend/';
 
 const SEED_BOXOFFICE = [
   {
-    title: 'Pushpa 2: The Rule',
+    title: 'Ramayana',
     day: 'Day 12',
-    today: '₹24.5 Cr',
-    total: '₹1420 Cr',
-    net: 'India: ₹980 Cr',
-    verdict: 'All-Time Record',
-    source: 'Sacnilk',
-    updatedAt: new Date().toISOString()
-  },
-  {
-    title: 'Kalki 2898 AD',
-    day: 'Day 35',
-    today: '₹3.2 Cr',
-    total: '₹1042 Cr',
-    net: 'India: ₹646 Cr',
+    today: '₹32.00 Cr',
+    total: '₹947.25 Cr',
+    net: 'India: ₹792.60 Cr',
     verdict: 'Mega Blockbuster',
-    source: 'Sacnilk',
+    source: 'Sacnilk Live',
     updatedAt: new Date().toISOString()
   },
   {
-    title: 'Stree 2',
-    day: 'Day 40',
-    today: '₹2.1 Cr',
-    total: '₹874 Cr',
-    net: 'India: ₹598 Cr',
-    verdict: 'Historic Hit',
-    source: 'Sacnilk',
-    updatedAt: new Date().toISOString()
-  },
-  {
-    title: 'Devara: Part 1',
-    day: 'Day 20',
-    today: '₹4.8 Cr',
-    total: '₹510 Cr',
-    net: 'India: ₹295 Cr',
+    title: 'Scene',
+    day: 'Day 11',
+    today: '₹2.85 Cr',
+    total: '₹161.85 Cr',
+    net: 'India: ₹139.35 Cr',
     verdict: 'Super Hit',
-    source: 'Sacnilk',
+    source: 'Sacnilk Live',
     updatedAt: new Date().toISOString()
   },
   {
-    title: 'Gladiator II',
-    day: 'Weekend 2',
-    today: '$18.5M',
-    total: '$320M',
-    net: 'Dom: $112M',
-    verdict: 'Hit',
-    source: 'BoxOfficeMojo',
+    title: 'Bouma',
+    day: 'Day 4',
+    today: '₹1.50 Cr',
+    total: '₹4.82 Cr',
+    net: 'India: ₹4.15 Cr',
+    verdict: 'Trending',
+    source: 'Sacnilk Live',
+    updatedAt: new Date().toISOString()
+  },
+  {
+    title: 'Donga Naa Koduku',
+    day: 'Day 4',
+    today: '₹78 L',
+    total: '₹7.60 Cr',
+    net: 'India: ₹6.58 Cr',
+    verdict: 'Trending',
+    source: 'Sacnilk Live',
     updatedAt: new Date().toISOString()
   }
 ];
+
+let hasScrapedLive = false;
 
 function initBoxOfficeStore() {
   if (store.boxoffice.size === 0) {
@@ -1497,67 +1489,111 @@ function initBoxOfficeStore() {
   }
 }
 
-function parseSacnilkHtml(html) {
-  const results = [];
-  if (!html) return results;
+function parseSacnilkMovieHtml(html, slug = '') {
+  if (!html) return null;
+  const titleMatch = html.match(/<title>([^<(]+)/i);
+  let title = titleMatch ? titleMatch[1].replace(/box office collection/i, '').replace(/\|\s*sacnilk/i, '').trim() : '';
+  if (!title) return null;
 
-  const trRegex = /<tr[^>]*>([\s\S]*?)<\/tr>/gi;
-  let trMatch;
-  while ((trMatch = trRegex.exec(html)) !== null) {
-    const rowHtml = trMatch[1];
-    const tdMatches = [...rowHtml.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => m[1].replace(/<[^>]+>/g, '').trim());
-    if (tdMatches.length >= 4) {
-      const titleLink = rowHtml.match(/<a[^>]+href=["'][^"']*quickreporting[^"']*["'][^>]*>([^<]+)<\/a>/i);
-      const title = titleLink ? titleLink[1].trim() : tdMatches[0];
-      if (title && title.length >= 2 && !/^(movie|rank|sl|name|title|day|total)$/i.test(title)) {
-        let todayVal = '';
-        let totalVal = '';
-        let dayVal = '';
+  const stats = {};
+  const statRegex = /<div[^>]*class=["']ds-stat__k["']>([^<]+)<\/div>\s*<div[^>]*class=["']ds-stat__v["']>([^<]+)<\/div>/gi;
+  let sm;
+  while ((sm = statRegex.exec(html)) !== null) {
+    stats[sm[1].trim().toLowerCase()] = sm[2].trim();
+  }
 
-        for (const col of tdMatches) {
-          if (/day\s*\d+/i.test(col)) dayVal = col;
-          else if (/₹|cr|crore|\$|m|k/i.test(col)) {
-            if (!todayVal) todayVal = col.replace(/\s+/g, ' ');
-            else if (!totalVal) totalVal = col.replace(/\s+/g, ' ');
-          }
-        }
+  let total = stats['worldwide gross'] || stats['worldwide'] || stats['india gross'] || '-';
+  if (total === '-') {
+    const wwMatch = html.match(/(?:Worldwide\s+Gross\s+Collection["'],\s*"value":\s*"|worldwide\s+gross\s+collection\s+stands\s+at\s+)\s*(₹\s*[\d,.]+\s*(?:Cr|Lakh|L)?)/i);
+    if (wwMatch) total = wwMatch[1].replace(/\s+/g, ' ');
+  }
 
-        if (todayVal || totalVal) {
-          results.push({
-            title: title.replace(/&amp;/g, '&'),
-            day: dayVal || 'Today',
-            today: todayVal ? (todayVal.startsWith('₹') || todayVal.startsWith('$') ? todayVal : `₹${todayVal}`) : '-',
-            total: totalVal ? (totalVal.startsWith('₹') || totalVal.startsWith('$') ? totalVal : `₹${totalVal}`) : '-',
-            net: '',
-            verdict: 'Trending',
-            source: 'Sacnilk',
-            updatedAt: new Date().toISOString()
-          });
-        }
-      }
+  let net = stats['india net'] ? `India: ${stats['india net']}` : '';
+
+  let day = 'Live';
+  let today = '-';
+  for (const k of Object.keys(stats)) {
+    if (/^day\s+\d+$/i.test(k)) {
+      day = k.charAt(0).toUpperCase() + k.slice(1);
+      today = stats[k];
+      break;
     }
   }
 
-  if (results.length === 0) {
-    const articleRegex = /([A-Za-z0-9\s:–-]+?)\s+Box\s+Office\s+Collection\s+(Day\s+\d+|Weekend\s+\d+|Total)?[:\s–-]+.*?(?:₹|Rs\.?)\s*([\d.]+\s*(?:Cr|Crore|Lakh|L)?)/gi;
-    let artMatch;
-    while ((artMatch = articleRegex.exec(html)) !== null) {
-      const mTitle = artMatch[1].replace(/<[^>]+>/g, '').trim();
-      if (mTitle.length > 2 && mTitle.length < 35 && !/^(the|box office|live|today)$/i.test(mTitle)) {
-        results.push({
-          title: mTitle,
-          day: artMatch[2] ? artMatch[2].trim() : 'Today',
-          today: `₹${artMatch[3].trim()}`,
-          total: '-',
-          net: '',
-          verdict: 'Trending',
-          source: 'Sacnilk',
-          updatedAt: new Date().toISOString()
-        });
-      }
+  let verdict = 'Trending';
+  if (total.includes('Cr')) {
+    const val = parseFloat(total.replace(/[^\d.]/g, ''));
+    if (val >= 1000) verdict = 'All-Time Record';
+    else if (val >= 500) verdict = 'Mega Blockbuster';
+    else if (val >= 200) verdict = 'Blockbuster';
+    else if (val >= 100) verdict = 'Super Hit';
+    else if (val >= 50) verdict = 'Hit';
+  }
+
+  return {
+    title,
+    day,
+    today,
+    total,
+    net,
+    verdict,
+    slug,
+    source: 'Sacnilk Live',
+    updatedAt: new Date().toISOString()
+  };
+}
+
+async function fetchSacnilkMovieBySlug(slug) {
+  try {
+    const url = slug.startsWith('http') ? slug : `${SACNILK_BASE}${slug}`;
+    const html = await http(url, { as: 'text', retries: 1 });
+    return parseSacnilkMovieHtml(html, slug);
+  } catch (err) {
+    return null;
+  }
+}
+
+async function findSacnilkMovie(query) {
+  if (!query) return null;
+  const qClean = query.toLowerCase().trim();
+  const qSlug = qClean.replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+  // 1. Check existing store
+  for (const item of store.boxoffice.values()) {
+    if (item.title.toLowerCase().includes(qClean) || qClean.includes(item.title.toLowerCase())) {
+      return item;
     }
   }
-  return results;
+
+  // 2. Fetch live slugs from Sacnilk /live
+  try {
+    const liveHtml = await http(SACNILK_LIVE, { as: 'text', retries: 1 });
+    const slugMatches = [...liveHtml.matchAll(/href=["'](\/movie\/[a-zA-Z0-9_-]+)["']/g)].map(m => m[1]);
+    const uniqueSlugs = [...new Set(slugMatches)];
+
+    const matchedSlug = uniqueSlugs.find(s => s.toLowerCase().includes(qSlug));
+    if (matchedSlug) {
+      const movie = await fetchSacnilkMovieBySlug(matchedSlug);
+      if (movie && movie.title) {
+        store.boxoffice.set(normName(movie.title), movie);
+        return movie;
+      }
+    }
+  } catch (err) {
+    console.warn(`[BoxOffice] Error fetching live list: ${err.message}`);
+  }
+
+  // 3. Try direct candidate slugs with release years
+  for (const year of ['2026', '2025', '2024']) {
+    const cand = `/movie/${qSlug}_${year}`;
+    const m = await fetchSacnilkMovieBySlug(cand);
+    if (m && m.title) {
+      store.boxoffice.set(normName(m.title), m);
+      return m;
+    }
+  }
+
+  return null;
 }
 
 function parseMojoHtml(html) {
@@ -1591,14 +1627,24 @@ async function boxofficeSync() {
   let count = 0;
 
   try {
-    const html = await http(SACNILK_URL, { as: 'text', retries: 1 });
-    const items = parseSacnilkHtml(html);
-    if (items.length > 0) {
-      for (const it of items) {
-        store.boxoffice.set(normName(it.title), it);
-        count++;
+    const liveHtml = await http(SACNILK_LIVE, { as: 'text', retries: 1 });
+    const slugMatches = [...liveHtml.matchAll(/href=["'](\/movie\/[a-zA-Z0-9_-]+)["']/g)].map(m => m[1]);
+    const uniqueSlugs = [...new Set(slugMatches)];
+
+    if (uniqueSlugs.length > 0) {
+      if (!hasScrapedLive) {
+        store.boxoffice.clear();
+        hasScrapedLive = true;
       }
-      console.log(`🎬 [BoxOffice] Scraped ${items.length} movies from Sacnilk`);
+
+      for (const slug of uniqueSlugs.slice(0, 6)) {
+        const item = await fetchSacnilkMovieBySlug(slug);
+        if (item && item.title && (item.today !== '-' || item.total !== '-')) {
+          store.boxoffice.set(normName(item.title), item);
+          count++;
+        }
+      }
+      console.log(`🎬 [BoxOffice] Scraped ${count} live movies from Sacnilk`);
     }
   } catch (err) {
     console.warn(`⚠️ [BoxOffice] Sacnilk fetch notice: ${err.message}`);
@@ -1608,7 +1654,7 @@ async function boxofficeSync() {
     const mojoHtml = await http(MOJO_URL, { as: 'text', retries: 1 });
     const mojoItems = parseMojoHtml(mojoHtml);
     if (mojoItems.length > 0) {
-      for (const it of mojoItems.slice(0, 5)) {
+      for (const it of mojoItems.slice(0, 3)) {
         if (!store.boxoffice.has(normName(it.title))) {
           store.boxoffice.set(normName(it.title), it);
           count++;
@@ -1623,13 +1669,18 @@ async function boxofficeSync() {
   return `${store.boxoffice.size} movies tracked`;
 }
 
-function getBoxOfficeList() {
+async function getBoxOfficeList(queryMovie) {
   initBoxOfficeStore();
+  if (queryMovie) {
+    const specific = await findSacnilkMovie(queryMovie);
+    if (specific) return [specific];
+  }
   return [...store.boxoffice.values()];
 }
 
-app.get('/api/boxoffice', (req, res) => {
-  const movies = getBoxOfficeList();
+app.get('/api/boxoffice', async (req, res) => {
+  const queryMovie = req.query.movie || req.query.q || req.query.title;
+  const movies = await getBoxOfficeList(queryMovie);
   res.json({
     ok: true,
     count: movies.length,
@@ -1638,8 +1689,9 @@ app.get('/api/boxoffice', (req, res) => {
   });
 });
 
-app.get('/api/emo/boxoffice', (req, res) => {
-  const movies = getBoxOfficeList();
+app.get('/api/emo/boxoffice', async (req, res) => {
+  const queryMovie = req.query.movie || req.query.q || req.query.title;
+  const movies = await getBoxOfficeList(queryMovie);
   res.json({
     ok: true,
     count: movies.length,
