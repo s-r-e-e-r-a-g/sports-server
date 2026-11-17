@@ -1480,11 +1480,14 @@ const SEED_BOXOFFICE = [
 ];
 
 let hasScrapedLive = false;
+const removedBoxOffice = new Set();
 
 function initBoxOfficeStore() {
   if (store.boxoffice.size === 0) {
     for (const item of SEED_BOXOFFICE) {
-      store.boxoffice.set(normName(item.title), item);
+      if (!removedBoxOffice.has(normName(item.title))) {
+        store.boxoffice.set(normName(item.title), item);
+      }
     }
   }
 }
@@ -1669,10 +1672,13 @@ async function boxofficeSync() {
       }
 
       for (const slug of uniqueSlugs.slice(0, 6)) {
+        if (removedBoxOffice.has(normName(slug))) continue;
         const item = await fetchSacnilkMovieBySlug(slug);
         if (item && item.title && (item.today !== '-' || item.total !== '-')) {
-          store.boxoffice.set(normName(item.title), item);
-          count++;
+          if (!removedBoxOffice.has(normName(item.title))) {
+            store.boxoffice.set(normName(item.title), item);
+            count++;
+          }
         }
       }
       console.log(`🎬 [BoxOffice] Scraped ${count} live movies from Sacnilk`);
@@ -1686,7 +1692,7 @@ async function boxofficeSync() {
     const mojoItems = parseMojoHtml(mojoHtml);
     if (mojoItems.length > 0) {
       for (const it of mojoItems.slice(0, 3)) {
-        if (!store.boxoffice.has(normName(it.title))) {
+        if (!store.boxoffice.has(normName(it.title)) && !removedBoxOffice.has(normName(it.title))) {
           store.boxoffice.set(normName(it.title), it);
           count++;
         }
@@ -1731,6 +1737,37 @@ app.get('/api/emo/boxoffice', async (req, res) => {
   });
 });
 
+function handleBoxOfficeDelete(title) {
+  if (!title || title === 'all') {
+    store.boxoffice.clear();
+    removedBoxOffice.clear();
+    return true;
+  }
+  const norm = normName(title);
+  removedBoxOffice.add(norm);
+  for (const [key, val] of store.boxoffice.entries()) {
+    if (key.includes(norm) || norm.includes(key) || normName(val.title).includes(norm)) {
+      store.boxoffice.delete(key);
+      removedBoxOffice.add(key);
+    }
+  }
+  return true;
+}
+
+app.delete('/api/boxoffice', (req, res) => {
+  initBoxOfficeStore();
+  const title = req.query.title || req.query.movie || req.body?.title;
+  handleBoxOfficeDelete(title);
+  res.json({ ok: true, total: store.boxoffice.size });
+});
+
+app.delete('/api/emo/boxoffice', (req, res) => {
+  initBoxOfficeStore();
+  const title = req.query.title || req.query.movie || req.body?.title;
+  handleBoxOfficeDelete(title);
+  res.json({ ok: true, total: store.boxoffice.size });
+});
+
 app.post('/api/boxoffice', (req, res) => {
   initBoxOfficeStore();
   const body = req.body;
@@ -1739,6 +1776,8 @@ app.post('/api/boxoffice', (req, res) => {
   let added = 0;
   for (const it of items) {
     if (it.title) {
+      const norm = normName(it.title);
+      removedBoxOffice.delete(norm);
       const entry = {
         title: it.title,
         day: it.day || 'Today',
@@ -1749,7 +1788,7 @@ app.post('/api/boxoffice', (req, res) => {
         source: it.source || 'Manual',
         updatedAt: new Date().toISOString()
       };
-      store.boxoffice.set(normName(it.title), entry);
+      store.boxoffice.set(norm, entry);
       added++;
     }
   }
@@ -1764,6 +1803,8 @@ app.post('/api/emo/boxoffice', (req, res) => {
   let added = 0;
   for (const it of items) {
     if (it.title) {
+      const norm = normName(it.title);
+      removedBoxOffice.delete(norm);
       const entry = {
         title: it.title,
         day: it.day || 'Today',
@@ -1774,7 +1815,7 @@ app.post('/api/emo/boxoffice', (req, res) => {
         source: it.source || 'Manual',
         updatedAt: new Date().toISOString()
       };
-      store.boxoffice.set(normName(it.title), entry);
+      store.boxoffice.set(norm, entry);
       added++;
     }
   }
