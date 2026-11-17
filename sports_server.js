@@ -1441,9 +1441,9 @@ const SEED_BOXOFFICE = [
     title: 'Ramayana',
     day: 'Day 12',
     today: '₹32.00 Cr',
-    total: '₹947.25 Cr',
+    total: '₹1,437.25 Cr',
     net: 'India: ₹792.60 Cr',
-    verdict: 'Mega Blockbuster',
+    verdict: 'All-Time Record',
     source: 'Sacnilk Live',
     updatedAt: new Date().toISOString()
   },
@@ -1451,18 +1451,18 @@ const SEED_BOXOFFICE = [
     title: 'Scene',
     day: 'Day 11',
     today: '₹2.85 Cr',
-    total: '₹161.85 Cr',
+    total: '₹247.85 Cr',
     net: 'India: ₹139.35 Cr',
-    verdict: 'Super Hit',
+    verdict: 'Blockbuster',
     source: 'Sacnilk Live',
     updatedAt: new Date().toISOString()
   },
   {
     title: 'Bouma',
-    day: 'Day 4',
-    today: '₹1.50 Cr',
+    day: 'Day 5',
+    today: '₹82 L',
     total: '₹4.82 Cr',
-    net: 'India: ₹4.15 Cr',
+    net: 'India: ₹4.97 Cr',
     verdict: 'Trending',
     source: 'Sacnilk Live',
     updatedAt: new Date().toISOString()
@@ -1502,14 +1502,35 @@ function parseSacnilkMovieHtml(html, slug = '') {
     stats[sm[1].trim().toLowerCase()] = sm[2].trim();
   }
 
-  let total = stats['worldwide gross'] || stats['worldwide'] || stats['india gross'] || '-';
-  if (total === '-') {
-    const wwMatch = html.match(/(?:Worldwide\s+Gross\s+Collection["'],\s*"value":\s*"|worldwide\s+gross\s+collection\s+stands\s+at\s+)\s*(₹\s*[\d,.]+\s*(?:Cr|Lakh|L)?)/i);
-    if (wwMatch) total = wwMatch[1].replace(/\s+/g, ' ');
+  // 1. Worldwide Gross from JSON-LD / metadata / text (true global total)
+  let total = '-';
+  const wwMatch = html.match(/(?:Worldwide\s+Gross\s+Collection["'],\s*"value":\s*"|worldwide\s+gross\s+collection\s+stands\s+at\s+|Worldwide\s+gross\s*·[^\n<]+<span[^>]*>)\s*([₹$]?\s*[\d,.]+\s*(?:Cr|Crore|Crores|Lakh|L|M|B|K)?)/i);
+  if (wwMatch) {
+    total = wwMatch[1].replace(/\s+/g, ' ').replace(/Crores?/i, 'Cr').trim();
+    if (!total.startsWith('₹') && !total.startsWith('$')) total = '₹' + total;
   }
 
+  // 2. If not found, check explicit worldwide stat
+  if (total === '-' && (stats['worldwide gross'] || stats['worldwide'])) {
+    total = stats['worldwide gross'] || stats['worldwide'];
+  }
+
+  // 3. Compute Worldwide Gross = India Gross + Overseas Gross
+  if (total === '-' && stats['india gross']) {
+    const ig = parseFloat(stats['india gross'].replace(/[^\d.]/g, '')) || 0;
+    const ovStr = stats['overseas'] || '';
+    const ov = (!ovStr.includes('—') && !ovStr.includes('-')) ? (parseFloat(ovStr.replace(/[^\d.]/g, '')) || 0) : 0;
+    if (ov > 0) {
+      total = `₹${(ig + ov).toFixed(2)} Cr`;
+    } else {
+      total = stats['india gross'];
+    }
+  }
+
+  // 4. Net collection (India Net)
   let net = stats['india net'] ? `India: ${stats['india net']}` : '';
 
+  // 5. Day & Today collection
   let day = 'Live';
   let today = '-';
   for (const k of Object.keys(stats)) {
@@ -1520,6 +1541,16 @@ function parseSacnilkMovieHtml(html, slug = '') {
     }
   }
 
+  // Fallback for Day / Today from text if not in ds-stat
+  if (today === '-') {
+    const dayTodayMatch = html.match(/(Day\s+\d+)<\/div><div[^>]*class=["']ds-stat__v["']>([₹\d,.]+\s*(?:Cr|Lakh|L)?)/i);
+    if (dayTodayMatch) {
+      day = dayTodayMatch[1].trim();
+      today = dayTodayMatch[2].trim();
+    }
+  }
+
+  // 6. Verdict
   let verdict = 'Trending';
   if (total.includes('Cr')) {
     const val = parseFloat(total.replace(/[^\d.]/g, ''));
