@@ -1012,7 +1012,14 @@ async function cricketSync() {
 // ═══════════════════════════ QUERY HELPERS ════════════════════════════
 function filterMatches(list, q, kind) {
   let out = list;
-  if (kind === 'live') out = out.filter((m) => m.status === 'live');
+  if (kind === 'live') {
+    out = out.filter((m) => {
+      if (m.status !== 'live') return false;
+      // Stumps in Test/First-class cricket is paused for the day, not active live play
+      if (/stump/i.test(m.statusText || '') || /stump/i.test(m.live?.status || '')) return false;
+      return true;
+    });
+  }
   if (kind === 'fixtures') out = out.filter((m) => m.status === 'scheduled' || m.status === 'postponed');
   if (kind === 'results') out = out.filter((m) => m.status === 'finished' || m.status === 'cancelled');
   const tz = q.tz || CONFIG.timezone;
@@ -1356,11 +1363,75 @@ app.get('/api/emo/live', async (req, res) => {
   if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
   if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
   const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
+  const cricMatches = filterMatches(cricketMatches(), req.query, 'live');
+
+  // Lightweight mode: when requested by EmoDesk or with ?compact=1 / ?brief=1, return small payload
+  if (req.query.compact || req.query.brief || req.query.simple || req.headers['user-agent']?.includes('EmoDesk')) {
+    return res.json({
+      live: fbMatches.length > 0 || cricMatches.length > 0,
+      card: cricMatches.length > 0 ? 'cricket' : (fbMatches.length > 0 ? 'football' : ''),
+      football: fbMatches.map((m) => ({
+        id: m.id || '',
+        sport: 'football',
+        title: m.title || '',
+        status: m.status || 'live',
+        statusText: m.statusText || '',
+        home: m.home?.name || m.home?.short || '',
+        away: m.away?.name || m.away?.short || '',
+        league: m.league?.slug || '',
+      })),
+      cricket: cricMatches.map((m) => ({
+        id: m.id || '',
+        sport: 'cricket',
+        title: m.title || '',
+        status: m.status || 'live',
+        statusText: m.live?.status || m.statusText || '',
+        teams: (m.teams || []).slice(0, 2).map((t) => ({
+          name: t.name || '',
+          short: makeShortName(t.short, t.name),
+        })),
+      })),
+    });
+  }
+
   await enrichMatchesWithStandings(fbMatches);
   res.json({
     football: fbMatches.map(toEmoFootballMatch),
-    cricket: filterMatches(cricketMatches(), req.query, 'live').map(toEmoCricketMatch),
+    cricket: cricMatches.map(toEmoCricketMatch),
   });
+});
+
+app.get('/api/emo/live/active', async (req, res) => {
+  if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
+  if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
+
+  const cricMatches = filterMatches(cricketMatches(), req.query, 'live');
+  if (cricMatches.length > 0) {
+    const m = cricMatches[0];
+    return res.json({
+      live: true,
+      card: 'cricket',
+      id: m.id || '',
+      title: m.title || '',
+      status: m.status || 'live',
+      statusText: m.live?.status || m.statusText || '',
+    });
+  }
+
+  const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
+  if (fbMatches.length > 0) {
+    const m = fbMatches[0];
+    return res.json({
+      live: true,
+      card: 'football',
+      id: m.id || '',
+      title: m.title || '',
+      status: m.status || 'live',
+      statusText: m.statusText || '',
+    });
+  }
+
+  res.json({ live: false });
 });
 
 for (const kind of ['live', 'fixtures', 'results', 'all']) {
