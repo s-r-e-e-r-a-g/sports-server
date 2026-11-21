@@ -610,11 +610,23 @@ function normCricketEspn(ev, lg) {
   const state = fs.type?.state || ev.status;
   const label = fs.type?.description || ev.summary || '';
   let status = espnStatus(state, label);
-  const anyScore = (ev.competitors || []).some((c) => c.score);
+  const anyScore = (ev.competitors || []).some((c) => c.score && String(c.score).trim().length > 0);
+
+  // Check all possible indicators of Stumps or close of play in Test/FC cricket
+  const isStumps = /stump|close of play|day \d+ -/i.test(
+    `${label} ${ev.summary || ''} ${fs.summary || ''} ${fs.type?.description || ''} ${fs.type?.detail || ''} ${fs.type?.shortDetail || ''}`
+  );
+
   // ESPN marks some matches "in" before a ball is bowled
-  if (status === 'live' && !anyScore && /scheduled to begin|starts at/i.test(`${fs.longSummary} ${fs.summary}`)) {
+  if (status === 'live' && (!anyScore || /scheduled to begin|starts at|won the toss/i.test(`${fs.longSummary || ''} ${fs.summary || ''} ${label}`))) {
     status = 'scheduled';
   }
+
+  let statusText = fs.longSummary || fs.summary || ev.summary || label;
+  if (isStumps && !/stump/i.test(statusText)) {
+    statusText = `Stumps: ${statusText}`;
+  }
+
   return {
     id: `cr_espn_${ev.id}`,
     sourceId: String(ev.id),
@@ -627,7 +639,8 @@ function normCricketEspn(ev, lg) {
     startTime: ev.date,
     endTime: ev.endDate || null,
     status,
-    statusText: fs.longSummary || fs.summary || ev.summary || label,
+    statusText,
+    isStumps,
     session: fs.session || null,
     venue: ev.location || null,
     url: ev.link || null,
@@ -752,6 +765,11 @@ function normCricbuzz({ info, score }) {
     return { name: t?.teamName, short: makeShortName(t?.teamSName, t?.teamName), score: inn.map((i) => i.display).join(' & ') || null, innings: inn };
   };
   const ms = Number(info.startDate);
+  const isStumps = /stump|close of play/i.test(`${info.status || ''} ${info.state || ''}`);
+  let statusText = info.status || info.state || '';
+  if (isStumps && !/stump/i.test(statusText)) {
+    statusText = `Stumps: ${statusText}`;
+  }
   return {
     id: `cr_cb_${info.matchId}`,
     sourceId: String(info.matchId),
@@ -763,7 +781,8 @@ function normCricbuzz({ info, score }) {
     format: info.matchFormat || null,
     startTime: Number.isFinite(ms) ? new Date(ms).toISOString() : null,
     status: cbStatus(info.state),
-    statusText: info.status || info.state || '',
+    statusText,
+    isStumps,
     venue: [info.venueInfo?.ground, info.venueInfo?.city].filter(Boolean).join(', ') || null,
     teams: [team(info.team1, score?.team1Score), team(info.team2, score?.team2Score)],
     url: `https://www.cricbuzz.com/live-cricket-scores/${info.matchId}`,
@@ -1016,7 +1035,10 @@ function filterMatches(list, q, kind) {
     out = out.filter((m) => {
       if (m.status !== 'live') return false;
       // Stumps in Test/First-class cricket is paused for the day, not active live play
-      if (/stump/i.test(m.statusText || '') || /stump/i.test(m.live?.status || '')) return false;
+      if (m.isStumps) return false;
+      if (/stump/i.test(m.statusText || '') || /stump/i.test(m.live?.status || '') || /stump/i.test(m.summary || '')) return false;
+      // Exclude matches that haven't actually started bowling yet
+      if (/scheduled to begin|starts at|won the toss|toss delayed/i.test(m.statusText || '')) return false;
       return true;
     });
   }
@@ -1365,39 +1387,40 @@ app.get('/api/emo/live', async (req, res) => {
   const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
   const cricMatches = filterMatches(cricketMatches(), req.query, 'live');
 
-  // Lightweight mode: when requested by EmoDesk or with ?compact=1 / ?brief=1, return small payload
-  if (req.query.compact || req.query.brief || req.query.simple || req.headers['user-agent']?.includes('EmoDesk')) {
+  // Full raw details only if specifically requested with ?full=1
+  if (req.query.full) {
+    await enrichMatchesWithStandings(fbMatches);
     return res.json({
-      live: fbMatches.length > 0 || cricMatches.length > 0,
-      card: cricMatches.length > 0 ? 'cricket' : (fbMatches.length > 0 ? 'football' : ''),
-      football: fbMatches.map((m) => ({
-        id: m.id || '',
-        sport: 'football',
-        title: m.title || '',
-        status: m.status || 'live',
-        statusText: m.statusText || '',
-        home: m.home?.name || m.home?.short || '',
-        away: m.away?.name || m.away?.short || '',
-        league: m.league?.slug || '',
-      })),
-      cricket: cricMatches.map((m) => ({
-        id: m.id || '',
-        sport: 'cricket',
-        title: m.title || '',
-        status: m.status || 'live',
-        statusText: m.live?.status || m.statusText || '',
-        teams: (m.teams || []).slice(0, 2).map((t) => ({
-          name: t.name || '',
-          short: makeShortName(t.short, t.name),
-        })),
-      })),
+      football: fbMatches.map(toEmoFootballMatch),
+      cricket: cricMatches.map(toEmoCricketMatch),
     });
   }
 
-  await enrichMatchesWithStandings(fbMatches);
-  res.json({
-    football: fbMatches.map(toEmoFootballMatch),
-    cricket: cricMatches.map(toEmoCricketMatch),
+  // Default: Lightweight clean payload for EmoDesk (small JSON, fast over TLS)
+  return res.json({
+    live: fbMatches.length > 0 || cricMatches.length > 0,
+    card: cricMatches.length > 0 ? 'cricket' : (fbMatches.length > 0 ? 'football' : ''),
+    football: fbMatches.map((m) => ({
+      id: m.id || '',
+      sport: 'football',
+      title: m.title || '',
+      status: m.status || 'live',
+      statusText: m.statusText || '',
+      home: m.home?.name || m.home?.short || '',
+      away: m.away?.name || m.away?.short || '',
+      league: m.league?.slug || '',
+    })),
+    cricket: cricMatches.map((m) => ({
+      id: m.id || '',
+      sport: 'cricket',
+      title: m.title || '',
+      status: m.status || 'live',
+      statusText: m.live?.status || m.statusText || '',
+      teams: (m.teams || []).slice(0, 2).map((t) => ({
+        name: t.name || '',
+        short: makeShortName(t.short, t.name),
+      })),
+    })),
   });
 });
 
@@ -1406,32 +1429,51 @@ app.get('/api/emo/live/active', async (req, res) => {
   if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
 
   const cricMatches = filterMatches(cricketMatches(), req.query, 'live');
-  if (cricMatches.length > 0) {
-    const m = cricMatches[0];
-    return res.json({
-      live: true,
+  const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
+
+  const events = [];
+
+  for (const m of cricMatches) {
+    events.push({
+      sport: 'cricket',
       card: 'cricket',
       id: m.id || '',
       title: m.title || '',
+      teams: (m.teams || []).slice(0, 2).map((t) => t.name || t.short || ''),
       status: m.status || 'live',
       statusText: m.live?.status || m.statusText || '',
     });
   }
 
-  const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
-  if (fbMatches.length > 0) {
-    const m = fbMatches[0];
-    return res.json({
-      live: true,
+  for (const m of fbMatches) {
+    events.push({
+      sport: 'football',
       card: 'football',
       id: m.id || '',
-      title: m.title || '',
+      title: m.title || `${m.home?.name || m.home?.short || ''} vs ${m.away?.name || m.away?.short || ''}`,
+      home: m.home?.name || m.home?.short || '',
+      away: m.away?.name || m.away?.short || '',
+      league: m.league?.slug || '',
       status: m.status || 'live',
       statusText: m.statusText || '',
     });
   }
 
-  res.json({ live: false });
+  if (events.length === 0) {
+    return res.json({ live: false, count: 0, events: [] });
+  }
+
+  const primary = events[0];
+  return res.json({
+    live: true,
+    count: events.length,
+    card: primary.card,
+    id: primary.id,
+    title: primary.title,
+    status: primary.status,
+    statusText: primary.statusText,
+    events,
+  });
 });
 
 for (const kind of ['live', 'fixtures', 'results', 'all']) {
