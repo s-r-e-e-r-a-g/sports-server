@@ -1278,6 +1278,7 @@ app.get('/', (req, res) =>
       '--- EmoDesk Compact Endpoints (essential data only) ---',
       'GET /api/emo/health',
       'GET /api/emo/live',
+      'GET /api/emo/live/active?sports=cricket,football&teams=...&leagues=...',
       'GET /api/emo/stream',
       'GET /api/emo/football/{live|fixtures|results|all}',
       'GET /api/emo/football/leagues',
@@ -1472,6 +1473,78 @@ app.get('/api/emo/live/active', async (req, res) => {
     title: primary.title,
     status: primary.status,
     statusText: primary.statusText,
+    events,
+  });
+});
+
+app.get('/api/emo/live/active', async (req, res) => {
+  if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
+  if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
+
+  const sportsParam = req.query.sports ? String(req.query.sports).toLowerCase().split(/[,;]/).map((s) => s.trim()) : null;
+  const wantFootball = !sportsParam || sportsParam.includes('football') || sportsParam.includes('soccer');
+  const wantCricket = !sportsParam || sportsParam.includes('cricket');
+
+  const rawTeams = req.query.teams || req.query.team || '';
+  const teamList = rawTeams ? String(rawTeams).split(/[,;]/).map((s) => normName(s.trim())).filter(Boolean) : [];
+  const rawLeagues = req.query.leagues || req.query.league || '';
+  const leagueList = rawLeagues ? String(rawLeagues).split(/[,;]/).map((s) => s.trim().toLowerCase()).filter(Boolean) : [];
+
+  const limit = req.query.limit ? Math.min(parseInt(req.query.limit) || 10, 20) : 10;
+  const events = [];
+
+  // 1. Football
+  if (wantFootball) {
+    let fbMatches = filterMatches([...store.football.values()], req.query, 'live');
+    if (leagueList.length > 0 && !req.query.league) {
+      fbMatches = fbMatches.filter((m) => {
+        const slug = (m.league?.slug || '').toLowerCase();
+        const name = (m.league?.name || '').toLowerCase();
+        return leagueList.some((l) => slug === l || name.includes(l) || l.includes(slug));
+      });
+    }
+    for (const m of fbMatches) {
+      if (events.length >= limit) break;
+      const hName = m.home?.name || m.home?.short || '';
+      const aName = m.away?.name || m.away?.short || '';
+      events.push({
+        card: 'football',
+        id: String(m.id || ''),
+        title: m.title || `${hName} vs ${aName}`.trim(),
+        home: hName,
+        away: aName,
+        league: m.league?.slug || '',
+      });
+    }
+  }
+
+  // 2. Cricket
+  if (wantCricket && events.length < limit) {
+    let crMatches = filterMatches(cricketMatches(), req.query, 'live');
+    if (leagueList.length > 0 && !req.query.series) {
+      crMatches = crMatches.filter((m) => {
+        const sName = (m.series?.name || '').toLowerCase();
+        return leagueList.some((l) => sName.includes(l) || l.includes(sName));
+      });
+    }
+    for (const m of crMatches) {
+      if (events.length >= limit) break;
+      const t1 = m.teams?.[0]?.name || m.teams?.[0]?.short || '';
+      const t2 = m.teams?.[1]?.name || m.teams?.[1]?.short || '';
+      events.push({
+        card: 'cricket',
+        id: String(m.id || ''),
+        title: m.title || `${t1} vs ${t2}`.trim(),
+        home: t1,
+        away: t2,
+        league: m.series?.name || '',
+      });
+    }
+  }
+
+  res.json({
+    live: events.length > 0,
+    count: events.length,
     events,
   });
 });
