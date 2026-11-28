@@ -765,8 +765,14 @@ function normCricbuzz({ info, score }) {
     return { name: t?.teamName, short: makeShortName(t?.teamSName, t?.teamName), score: inn.map((i) => i.display).join(' & ') || null, innings: inn };
   };
   const ms = Number(info.startDate);
+  const teamsArr = [team(info.team1, score?.team1Score), team(info.team2, score?.team2Score)];
+  const anyScore = teamsArr.some((t) => t.score && t.score.trim().length > 0);
   const isStumps = /stump|close of play/i.test(`${info.status || ''} ${info.state || ''}`);
+  let status = cbStatus(info.state);
   let statusText = info.status || info.state || '';
+  if (status === 'live' && (!anyScore || /opt to bat|opt to bowl|won the toss|starts at|scheduled/i.test(statusText))) {
+    status = 'scheduled';
+  }
   if (isStumps && !/stump/i.test(statusText)) {
     statusText = `Stumps: ${statusText}`;
   }
@@ -780,11 +786,11 @@ function normCricbuzz({ info, score }) {
     description: info.matchDesc || null,
     format: info.matchFormat || null,
     startTime: Number.isFinite(ms) ? new Date(ms).toISOString() : null,
-    status: cbStatus(info.state),
+    status,
     statusText,
     isStumps,
     venue: [info.venueInfo?.ground, info.venueInfo?.city].filter(Boolean).join(', ') || null,
-    teams: [team(info.team1, score?.team1Score), team(info.team2, score?.team2Score)],
+    teams: teamsArr,
     url: `https://www.cricbuzz.com/live-cricket-scores/${info.matchId}`,
   };
 }
@@ -1429,58 +1435,6 @@ app.get('/api/emo/live/active', async (req, res) => {
   if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
   if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
 
-  const cricMatches = filterMatches(cricketMatches(), req.query, 'live');
-  const fbMatches = filterMatches([...store.football.values()], req.query, 'live');
-
-  const events = [];
-
-  for (const m of cricMatches) {
-    events.push({
-      sport: 'cricket',
-      card: 'cricket',
-      id: m.id || '',
-      title: m.title || '',
-      teams: (m.teams || []).slice(0, 2).map((t) => t.name || t.short || ''),
-      status: m.status || 'live',
-      statusText: m.live?.status || m.statusText || '',
-    });
-  }
-
-  for (const m of fbMatches) {
-    events.push({
-      sport: 'football',
-      card: 'football',
-      id: m.id || '',
-      title: m.title || `${m.home?.name || m.home?.short || ''} vs ${m.away?.name || m.away?.short || ''}`,
-      home: m.home?.name || m.home?.short || '',
-      away: m.away?.name || m.away?.short || '',
-      league: m.league?.slug || '',
-      status: m.status || 'live',
-      statusText: m.statusText || '',
-    });
-  }
-
-  if (events.length === 0) {
-    return res.json({ live: false, count: 0, events: [] });
-  }
-
-  const primary = events[0];
-  return res.json({
-    live: true,
-    count: events.length,
-    card: primary.card,
-    id: primary.id,
-    title: primary.title,
-    status: primary.status,
-    statusText: primary.statusText,
-    events,
-  });
-});
-
-app.get('/api/emo/live/active', async (req, res) => {
-  if (store.football.size === 0) { try { await footballLiveSync(); } catch {} }
-  if (store.cricketEspn.size === 0 && store.cricketCb.size === 0) { try { await cricketSync(); } catch {} }
-
   const sportsParam = req.query.sports ? String(req.query.sports).toLowerCase().split(/[,;]/).map((s) => s.trim()) : null;
   const wantFootball = !sportsParam || sportsParam.includes('football') || sportsParam.includes('soccer');
   const wantCricket = !sportsParam || sportsParam.includes('cricket');
@@ -1521,7 +1475,7 @@ app.get('/api/emo/live/active', async (req, res) => {
   // 2. Cricket
   if (wantCricket && events.length < limit) {
     let crMatches = filterMatches(cricketMatches(), req.query, 'live')
-      .filter((m) => !m.isStumps && !/stump|close of play/i.test(`${m.statusText || ''} ${m.live?.status || ''}`));
+      .filter((m) => !m.isStumps && !/stump|close of play|opt to bat|opt to bowl|won the toss/i.test(`${m.statusText || ''} ${m.live?.status || ''}`));
     if (leagueList.length > 0 && !req.query.series) {
       crMatches = crMatches.filter((m) => {
         const sName = (m.series?.name || '').toLowerCase();
@@ -1539,6 +1493,8 @@ app.get('/api/emo/live/active', async (req, res) => {
         home: t1,
         away: t2,
         league: m.series?.name || '',
+        status: m.status || 'live',
+        statusText: m.live?.status || m.statusText || '',
       });
     }
   }
