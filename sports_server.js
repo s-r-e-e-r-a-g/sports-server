@@ -1520,7 +1520,8 @@ app.get('/api/emo/live/active', async (req, res) => {
 
   // 2. Cricket
   if (wantCricket && events.length < limit) {
-    let crMatches = filterMatches(cricketMatches(), req.query, 'live');
+    let crMatches = filterMatches(cricketMatches(), req.query, 'live')
+      .filter((m) => !m.isStumps && !/stump|close of play/i.test(`${m.statusText || ''} ${m.live?.status || ''}`));
     if (leagueList.length > 0 && !req.query.series) {
       crMatches = crMatches.filter((m) => {
         const sName = (m.series?.name || '').toLowerCase();
